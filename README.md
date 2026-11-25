@@ -1,16 +1,16 @@
 # SpecPilot 复现工程
 
-## H100最新：SpecPilot v2 全盲测自主优化闭环完成（Round 1–4，2026-11-25）
+## H100最新：SpecPilot v2 全盲测自主优化闭环完成（Round 1–5 + §6.1 消融，2026-11-25）
 
-- **已完成**：构建 SpecPilot v2 自主闭环（`v2/`：Phase 0 硬件精确三因子 Ceiling、8×H100 持久探索池、严格盲测 Master + 多路并行 Direction、隔离 2×H100 Controller T1/T2、Phase 4 T3 Sealed Final、T4 Structured Memory 逐字节还原校验），完成 **Round 1–4** 全盲测独立优化与验证（审计 0 次联网、0 次读禁区）。
-- **核心成果（R4 修复版 `r4-blind-d6-fix-v1`）**：
-  - **独立 Dev Controller（30-req 2048-cap 双卡互换）**：**`1.7068×` `[1.6574, 1.7580]`**（**`326.97 tok/s`** vs Stock `190.41 tok/s`，`6.34×` AR，$\tau: 4.65 \to 10.05$）；FP32 LM-head Token Forcing 不匹配率 `0.6739%`（低于 Stock `0.7824%`），**`0` 大 margin 事件**（`promoted = true`）。
-  - **Token Forcing 实证拦截与闭环修复**：R4 初版（`331.87 tok/s`）因深树 TF32 Neumann 级数倍增灾难性相消触发 `15` 个大 margin 事件被 Controller 严格拒绝；盲测调试代理定位根因并改为精确 FP32 subwarp 反向三角求解后清零事件并晋升，且已将“优先处理上一轮 T1 有损候选”固化为 [v2/agents/master_prompt.md](v2/agents/master_prompt.md) 的 Priority 0 规则。
-  - **Phase 4 T3 Sealed Final（30 条严格未见请求）**：**`1.6700×` `[1.6273, 1.7148]`**（**`292.05 tok/s`** vs Stock `174.84 tok/s`，$\tau: 4.26 \to 8.70$）；未见集 2048-cap（`0.9042%` / `0` events）与 4096-cap 长序列（`0.9175%` / `0` events）双重 FP32 Token Forcing 全部通过（`sealed_final_passed = true`）。
-  - **T4 Structured Memory**：`r1_tree_gdn_b12 → r2_w12_gdnv2_fp8draft → r3_tree_wy_attn → r4_w6v2_adaptive_fixed` 四代传递重建 `TREE_SHA` **逐字节完全一致**（`byte_exact_match = true`）；5/5 `v2/tests` 单元测试通过。
-  - **论文 §6.1 对照消融（无 Cost Model 单 Agent）**：同一干净 `stock` 起点、严格盲测 3 轮串行探索，最强方案（`block_size=16 + FlashInfer GDN`）经同一 2×H100 Controller 测得 **`1.1173×` `[1.0809, 1.1590]`**（`209.79 tok/s`，$\tau=5.30$，`promoted = true`）；SpecPilot 完整架构仅首轮即 **`1.2960×`**（`+16.0%`，95% CI 无重叠），4 轮达 **`1.7068×`**（`+52.8%`）。
-- **正在做**：无活动 GPU 阻塞任务；核心自主闭环与 §6.1 消融均已封板提交。
-- **接下来（可选）**：基于 R4 基线重测三因子 Ceiling 启动盲测 Round 5，或扩展 Memory Transfer 跨模型测试。
+- **已完成**：构建 SpecPilot v2 自主闭环（`v2/`：Phase 0 硬件精确三因子 Ceiling、8×H100 持久探索池、严格盲测 Master + 多路并行 Direction、隔离 2×H100 Controller T1/T2、Phase 4 T3 Sealed Final、T4 Structured Memory 逐字节还原校验），完成 **Round 1–5** 全盲测独立优化、硬件屋顶收敛停机及 **§6.1 无 Cost Model 单 Agent 消融**（审计 0 次联网、0 次读禁区）。
+- **核心成果（R4 自适应 / R5 全开两级 Lookahead，均 0 大 margin 事件）**：
+  - **独立 Dev Controller（30-req 2048-cap 双卡互换）**：R5（`r5-blind-mode2-nosync-v1`）达到 **`1.7313×` `[1.7006, 1.7654]`**（**`334.96 tok/s`** vs Stock `190.32 tok/s`，`6.49×` AR，$\tau: 4.65 \to 12.20$，`0` events，`promoted = true`）；R4（`r4-blind-d6-fix-v1`）为 `1.7068× [1.6574, 1.7580]`（`326.97 tok/s`，`0` events）。
+  - **Phase 4 T3 Sealed Final（30 条严格未见请求 + 4096-cap Forcing）**：R4 自适应 `MODE=1` 达 **`1.6700×` `[1.6273, 1.7148]`**（**`292.05 tok/s`**，$\tau: 4.26 \to 8.70$），R5 `MODE=2` 达 **`1.6488×` `[1.6005, 1.6964]`**（`290.52 tok/s`，$\tau=10.54$）；两者在未见集 2048-cap 与 4096-cap 长序列 FP32 Token Forcing 上均为 **`0` 大 margin 事件**（`sealed_final_passed = true`）。
+  - **Token Forcing 实证拦截与 Priority 0 规则**：R4 初版（`331.87 tok/s`）因深树 TF32 Neumann 级数倍增灾难性相消触发 `15` 个大 margin 事件被 Controller 严格拒绝；盲测调试代理改为精确 FP32 subwarp 反向三角求解后清零事件并晋升，且已将“优先处理上一轮 T1 有损候选”固化为 [v2/agents/master_prompt.md](v2/agents/master_prompt.md) 的 Priority 0 规则。
+  - **T4 Structured Memory**：`r1 → r2 → r3 → r4 → r5_mode2_nosync` 五代传递重建 `TREE_SHA` **逐字节完全一致**（`byte_exact_match = true`）；5/5 `v2/tests` 单元测试通过。
+  - **论文 §6.1 对照消融（无 Cost Model 单 Agent）**：同一干净 `stock` 起点、严格盲测 3 轮串行探索，最强方案（`block_size=16 + FlashInfer GDN`）经同一 2×H100 Controller 测得 **`1.1173×` `[1.0809, 1.1590]`**（`209.79 tok/s`，$\tau=5.30$，`promoted = true`）；SpecPilot 完整架构仅首轮即 **`1.2960×`**（`+16.0%`，95% CI 无重叠），5 轮达 **`1.7313×`**（`+55.0%`）。
+- **正在做**：Round 5 已实证 4 条无损优化轴全部抵达 H100 物理/算法 Pareto 边界，Master 有据停机；项目已封板收官。
+- **接下来（可选）**：扩展 Memory Transfer 跨模型测试或新硬件平台迁移。
 
 完整实验记录、演进总表与 NorthJob UUID 见 [SpecPilot v2 全盲测闭环记录](docs/experiments/specpilot-v2-blind-r1-r4-20261125.md)。
 

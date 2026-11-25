@@ -24,6 +24,7 @@
 | **Round 3** | All-MMA Tree-WY GDN + Fused GQA Suffix Tree Attention | `1.6260× [1.5848, 1.6717]` (`319.77`, $\tau=6.83$) | `0.7378%` / `0` | `1.5745× [1.5440, 1.6080]` (`279.12`, $\tau=5.95$) | `0` / `0` | `r3_tree_wy_attn` (`true`) | `PROMOTED` + `SEALED` |
 | **Round 4（初版，被拒）** | Fast `sm_90` W6-v2 两级 Lookahead + 非对称 `M_q=16` 自适应 | `1.7312× [1.6901, 1.7736]` (`331.87`, $\tau=10.28$) | `0.9653%` / **`15` (`p=1.87e-5`)** | — | — | 未入库 | **`REJECTED (T1)`** |
 | **Round 4（修复版）** | 同上 + **精确 FP32 subwarp 反向三角 WY 求解** + `M_q=16` CUDA Graph 树缓冲捕获修复 | **`1.7068× [1.6574, 1.7580]`** (**`326.97`**, $\tau=10.05$, `6.34×` AR) | **`0.6739%` / `0` (`p=1.0`)** | **`1.6700× [1.6273, 1.7148]`** (**`292.05`**, $\tau=8.70$) | **`0` / `0` (`p=1.0`)** | **`r4_w6v2_adaptive_fixed` (`true`)** | **`PROMOTED` + `SEALED`** |
+| **Round 5（收官轮）** | Always-On 2-Pass (`MODE=2`) + 消除 2-pass `.item()` GPU-CPU 同步（`SP_OPT_W6_CACHE_NUM_TOK_CPU=1`）；同步在硬件屋顶证伪 D1/D2/D3/D5 四条路径 | **`1.7313× [1.7006, 1.7654]`** (**`334.96`**, $\tau=12.20$, `6.49×` AR) | **`0.8057%` / `0` (`p=1.0`)** | `1.6488× [1.6005, 1.6964]` (`290.52`, $\tau=10.54$) | **`0` / `0` (`p=1.0`)** | **`r5_mode2_nosync` (`true`)** | **`PROMOTED` + `SEALED` + 停机收官** |
 
 ## 3. Round 4 Token Forcing 拦截与闭环修复记录
 
@@ -44,7 +45,19 @@
 - Dev Controller R4（修复晋升）：`job-9f2490ce5d07-20261125162408`（`v2_runtime/controller/r4-blind-d6-fix-v1/verdict.json`）
 - Sealed Final R4（修复通过）：`sp-v2-sealed-r4-fix-20261125-a01`（`v2_runtime/sealed/r4_fix/sealed_verdict.json`）
 - Dev Controller §6.1 消融（Single-Agent 无 Cost Model）：`job-5e164dc49eee-20261125183458`（`v2_runtime/controller/ablation-single-nocm-v1/verdict.json`）
+- Dev Controller R5（晋升）：`job-1e8c09a76071-20261125205337`（`v2_runtime/controller/r5-blind-mode2-nosync-v1/verdict.json`）
+- Sealed Final R5（通过）：`job-3c4406f256ea-20261125210932`（`v2_runtime/sealed/r5/sealed_verdict.json`）
 - 本地单元测试：`python3 -m unittest discover -s v2/tests -p 'test_*.py' -v`（5/5 通过）。
+
+## 6. Round 5 物理屋顶收敛与有据停机结论
+
+- **4 条硬件/算法轴全部到达 H100 Pareto 边界**：
+  - **Exact 12-bit W12 目标 GEMM**：CUDA Graph 内实测 `15.38 ms`（`~2.45 TB/s` = H100 `2.91 TB/s` 流带宽屋顶的 84%），D1 优化仅剩 `0.70 ms` 空间且 Tier-3 净收益为负（`0.9794×`）；D3 无损 sub-12-bit Huffman 编码（0 bit 误差、`10.74 b/param`）在 SM90 `M=32` 受 SMEM bank conflict 与 INT32 ALU 限制慢于 12-bit SWAR（`0.605×`）。
+  - **Lookahead 量化与非 GEMM**：D2 实证 W4/W5 一致率掉至 `88.4%/92.8%`（vs W6 `97.4%`），W6 为 Pareto 最优；D5 实证非 GEMM 无损空间 `< 0.3 ms`，仅提取了 3 行 `dflash_worker_v2.py:2703` `.item()` GPU-CPU 同步修复。
+- **Dev vs Sealed 泛化对比（Phase 4 价值实证）**：
+  - 在接受率较高的 Dev 集（stock $\tau=4.65$）上，R5 `MODE=2` 推高 $\tau \to 12.20$ 并取得最高 Dev 成绩 **`1.7313× [1.7006, 1.7654]`**（`334.96 tok/s`，`6.49×` AR，`0` events）。
+  - 在更难的 Sealed 未见集（stock $\tau=4.26$）上，R5 仍 100% 无损通过（2048 & 4096 均 `0` events），加速比 **`1.6488× [1.6005, 1.6964]`**（`290.52 tok/s`），与 R4 自适应 `MODE=1` 的 **`1.6700× [1.6273, 1.7148]`**（`292.05 tok/s`）CI 重叠且略低——说明 `MODE=1` 在低接受率域更稳健，`MODE=2` 在高接受率域更快；两者共用同一套 `r5_integrated` 引擎（仅运行时环境变量切换）。
+  - 传递记忆校验：`stock → r1 → r2 → r3 → r4 → r5_mode2_nosync` 重建 `TREE_SHA = 8e5151207c22171ecfb21a4574c2fc1d26a43263cadfda98eba0f734cd720cb1`，`byte_exact_match = true`。Blind Round-5 Master 正式建议停止继续盲搜并封板收官。
 
 ## 5. 论文 §6.1 对照消融：无 Cost Model 单 Agent vs SpecPilot 完整架构
 
