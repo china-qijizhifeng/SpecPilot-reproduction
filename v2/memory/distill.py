@@ -64,6 +64,10 @@ def distill_entry(
     options: dict[str, str],
     summary: str,
     evidence: dict,
+    context: dict | None = None,
+    bottleneck_tags: list[str] | None = None,
+    one_line_summary: str | None = None,
+    mechanism_card: dict | None = None,
     memory_root: Path = MEMORY_ROOT,
 ) -> dict:
     base_dir = base_dir.resolve()
@@ -97,10 +101,16 @@ def distill_entry(
     source_sha = _engine_tree_sha(source_dir)
     manifest = {
         "entry_id": entry_id,
+        "kind": "positive",
+        "status": "active",
         "round": round_num,
         "requires": list(requires),
         "options": dict(options),
         "summary": summary,
+        "one_line_summary": one_line_summary or summary[:120],
+        "context": context,
+        "bottleneck_tags": sorted(set(bottleneck_tags or [])),
+        "mechanism_card": mechanism_card,
         "base_tree_sha": base_sha,
         "source_tree_sha": source_sha,
         "changed_files": sorted(changed),

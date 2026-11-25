@@ -13,6 +13,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from v2.memory.distill import distill_entry, verify_entry
+from v2.memory.store import (
+    build_index,
+    enrich_positive_entry,
+    format_index_markdown,
+    match_context,
+    record_negative_entry,
+    show_entry,
+)
 from v2.phase0.floors import H100_SXM5, compute_ceiling_report, compute_class_workloads, format_master_brief
 from v2.phase0.tau_headroom import analyze_tau_headroom, best_first_tree_acceptance, oracle_step_acceptance
 from v2.sandbox.bench_1gpu import stratify_easy_hard
@@ -151,6 +160,117 @@ class TestStratifiedBenchAndProtocol(unittest.TestCase):
         # Must remain 100% generic (no paper/solution hints)
         for forbidden in ("BM=32", "Huffman", "W12", "W6", "2.13x", "DFloat11"):
             self.assertNotIn(forbidden, prompt)
+
+
+class TestDualLayerMemoryStore(unittest.TestCase):
+    def _ctx(self, bs: int = 1, sm: str = "sm_90") -> dict:
+        return {
+            "model": {"target": "Qwen3.8-27B", "drafter": "DFlash2", "dtype": "bf16"},
+            "hardware": {"gpu": "H100-SXM5-80GB", "sm": sm},
+            "workload": {"batch_size": bs, "max_new_tokens": 2048, "decoding": "greedy_temp0"},
+            "dataset": {"suite": "5-suite-dev-en", "stock_tau": 4.65},
+        }
+
+    def test_context_match_exact_and_partial_drift(self):
+        c1 = self._ctx(bs=1, sm="sm_90")
+        self.assertEqual(match_context(c1, c1)["match_level"], "exact")
+        c2 = self._ctx(bs=16, sm="sm_120")
+        m = match_context(c1, c2)
+        self.assertEqual(m["match_level"], "partial")
+        self.assertEqual(m["matched_dims"], 2)
+        self.assertTrue(any("workload.batch_size: 1 -> 16" in d for d in m["diffs"]))
+        self.assertTrue(any("hardware.sm: sm_90 -> sm_120" in d for d in m["diffs"]))
+
+    def test_two_stage_index_show_provenance_and_byte_exact(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stock = root / "stock"
+            cand = root / "cand"
+            (stock / "python").mkdir(parents=True)
+            (stock / "python" / "mod.py").write_text("x = 1\n")
+            (cand / "python").mkdir(parents=True)
+            (cand / "python" / "mod.py").write_text("x = 2\n")
+
+            mem_base = root / "memory"
+            distill_entry(
+                entry_id="pos_r1",
+                round_num=1,
+                base_dir=stock,
+                source_dir=cand,
+                requires=[],
+                options={"SP_OPT_DEMO": "1"},
+                summary="Demo positive speedup",
+                evidence={"dev_gain": 1.25},
+                memory_root=mem_base / "entries",
+            )
+            enrich_positive_entry(
+                entry_id="pos_r1",
+                context=self._ctx(bs=1),
+                bottleneck_tags=["hbm_bw_bound"],
+                one_line_summary="Positive demo +25%",
+                memory_base=mem_base,
+            )
+            # Byte-exact replay must remain intact after enrichment
+            v = verify_entry("pos_r1", stock_dir=stock, memory_root=mem_base / "entries")
+            self.assertTrue(v["byte_exact_match"])
+
+            record_negative_entry(
+                neg_id="neg_r1_impl",
+                round_num=1,
+                base_tree_sha=v["expected_tree_sha"],
+                context=self._ctx(bs=1),
+                bottleneck_tags=["hbm_bw_bound", "smem_bank_conflict"],
+                hypothesis="Compressed kernel prototype",
+                failure_class="impl_underoptimized",
+                failed_precondition="SMEM LUT bank conflicts slowed decode by 40%",
+                reopen_condition="Use register bit-parallel decode without SMEM LUT",
+                one_line_summary="Compressed prototype slow on SMEM LUT (reopenable)",
+                evidence={"tier2_ratio": 0.60},
+                memory_base=mem_base,
+            )
+
+            # Stage 1: summary index with cross-workload query (bs=16) shows partial match
+            rows = build_index(
+                query_context=self._ctx(bs=16),
+                bottleneck_filter=["hbm_bw_bound"],
+                memory_base=mem_base,
+            )
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(r["context_match"] == "partial" for r in rows))
+            md = format_index_markdown(rows)
+            self.assertIn("neg_r1_impl", md)
+            self.assertIn("workload.batch_size: 1 -> 16", md)
+
+            # Stage 2: expand single entry & log provenance
+            prov = root / "provenance.jsonl"
+            detail = show_entry(
+                entry_id="neg_r1_impl",
+                query_context=self._ctx(bs=16),
+                provenance_log=prov,
+                memory_base=mem_base,
+            )
+            self.assertEqual(detail["failure_class"], "impl_underoptimized")
+            self.assertIn("register bit-parallel", detail["reopen_condition"])
+            prov_lines = [json.loads(l) for l in prov.read_text().splitlines() if l.strip()]
+            self.assertEqual(prov_lines[0]["reused_from"], "neg_r1_impl")
+
+    def test_memory_rejects_sealed_paths_and_secrets(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(ValueError):
+                record_negative_entry(
+                    neg_id="bad_sealed",
+                    round_num=1,
+                    base_tree_sha="0" * 64,
+                    context=self._ctx(),
+                    bottleneck_tags=["sync_bubble"],
+                    hypothesis="leaked eval/sealed/prompts.jsonl",
+                    failure_class="theory_falsified",
+                    failed_precondition="none",
+                    reopen_condition="none",
+                    one_line_summary="bad",
+                    evidence={},
+                    memory_base=Path(td),
+                )
 
 
 class TestSandboxPool(unittest.TestCase):

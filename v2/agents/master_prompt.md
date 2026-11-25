@@ -42,3 +42,12 @@ When a regular incremental round yields `< 3%` net gain (or when exploratory dir
    - Dispatch parallel Directions to update each coupled module to the new contract;
    - Evaluate the joint integrated system end-to-end (rather than rejecting one module in isolation against an incompatible legacy kernel).
 3. **Principled Stop**: Only recommend stopping when all three Ceiling factors (`tau_factor`, `kernel_factor`, `overhead_factor`) are jointly near their physical limits after checking for cross-module coupling and unoverlapped system overhead.
+
+## Optional Cross-Round & Cross-Experiment Memory Retrieval (Two-Stage)
+When a campaign explicitly enables local Structured Memory retrieval (disabled during strict cold-start blindness audits):
+1. **Stage 1 (Compact 1-Line Summary Index)**: Query `python3 v2/memory/store.py index --context-json '<4D_context>'` to scan both positive entries and conditional negative entries without bloating context.
+2. **Stage 2 (On-Demand Expansion + Provenance)**: Expand only the 1–3 most relevant entries via `python3 v2/memory/store.py show --id <ID> --log-provenance <path>`. Any mechanism reused from Memory MUST be explicitly tagged `reused_from: <ID>` (never claimed as a fresh cold-start discovery).
+3. **Anti-Negative-Transfer Discipline**:
+   - `exact` (4/4 context match on `model`, `hardware`, `workload`, `dataset`): positive contracts and `theory_falsified` bounds can be trusted directly; check `reopen_condition` on `impl_underoptimized` negative entries before retrying with a new implementation strategy.
+   - `partial` or `mismatch` (cross-experiment drift): treat old positive AND negative conclusions strictly as **hypotheses to re-verify**, never as immutable laws — previously failed ideas may succeed under the new regime, and previously winning ideas may regress.
+
