@@ -49,6 +49,11 @@ def compute_class_workloads(
     kv_len: int = 1024,
     weight_bytes_per_elem: float = 2.0,
     draft_weight_bytes_per_elem: float = 2.0,
+    lookahead_weight_bytes_per_elem: float = 0.0,
+    lookahead_rows: int = 0,
+    lookahead_trigger_rate: float = 0.0,
+    drafter_passes_per_step: float = 1.0,
+    lm_head_passes_per_step: float = 1.0,
 ) -> dict[str, dict]:
     """Compute exact bytes & FLOPs per speculative step for each kernel class."""
     tc = target_cfg.get("text_config", target_cfg)
@@ -91,10 +96,10 @@ def compute_class_workloads(
     target_gemm_bytes = target_linear_params * weight_bytes_per_elem
     target_gemm_flops = 2.0 * target_linear_params * verify_rows
 
-    # 2) lm_head
+    # 2) lm_head (scaled by passes per step when multi-pass lookahead runs lm_head)
     lm_head_params = h * vocab
-    lm_head_bytes = lm_head_params * weight_bytes_per_elem
-    lm_head_flops = 2.0 * lm_head_params * verify_rows
+    lm_head_bytes = lm_head_params * weight_bytes_per_elem * lm_head_passes_per_step
+    lm_head_flops = 2.0 * lm_head_params * verify_rows * lm_head_passes_per_step
 
     # 3) gdn_recurrent: FP32 state [n_v_heads, k_dim, v_dim] read + write per layer + conv state
     state_elems_per_layer = gdn_v_heads * gdn_k_dim * gdn_v_dim
@@ -118,10 +123,10 @@ def compute_class_workloads(
     d_fc_params = (d_target_layers * dh) * dh
     # Drafter shares target LM head (or runs its own lm_head over draft_block rows)
     d_params = dlayers * d_layer_params + d_fc_params + h * vocab
-    drafter_bytes = d_params * draft_weight_bytes_per_elem
-    drafter_flops = 2.0 * d_params * draft_block
+    drafter_bytes = d_params * draft_weight_bytes_per_elem * drafter_passes_per_step
+    drafter_flops = 2.0 * d_params * draft_block * drafter_passes_per_step
 
-    return {
+    out = {
         "target_gemm": {
             "params": target_linear_params,
             "bytes": target_gemm_bytes,
@@ -147,6 +152,16 @@ def compute_class_workloads(
         },
     }
 
+    if lookahead_trigger_rate > 0.0 and lookahead_weight_bytes_per_elem > 0.0:
+        la_rows = lookahead_rows if lookahead_rows > 0 else verify_rows
+        out["lookahead_gemm"] = {
+            "params": target_linear_params,
+            "bytes": target_linear_params * lookahead_weight_bytes_per_elem * lookahead_trigger_rate,
+            "flops": 2.0 * target_linear_params * la_rows * lookahead_trigger_rate,
+        }
+
+    return out
+
 
 def compute_ceiling_report(
     *,
@@ -160,6 +175,12 @@ def compute_ceiling_report(
     kv_len: int = 1024,
     weight_bytes_per_elem: float = 2.0,
     draft_weight_bytes_per_elem: float = 2.0,
+    lookahead_weight_bytes_per_elem: float = 0.0,
+    lookahead_rows: int = 0,
+    lookahead_trigger_rate: float = 0.0,
+    drafter_passes_per_step: float = 1.0,
+    lm_head_passes_per_step: float = 1.0,
+    tau_headroom: dict | None = None,
     device: DeviceSpec = H100_SXM5,
     target_cfg: dict | None = None,
     draft_cfg: dict | None = None,
@@ -175,6 +196,11 @@ def compute_ceiling_report(
         kv_len=kv_len,
         weight_bytes_per_elem=weight_bytes_per_elem,
         draft_weight_bytes_per_elem=draft_weight_bytes_per_elem,
+        lookahead_weight_bytes_per_elem=lookahead_weight_bytes_per_elem,
+        lookahead_rows=lookahead_rows,
+        lookahead_trigger_rate=lookahead_trigger_rate,
+        drafter_passes_per_step=drafter_passes_per_step,
+        lm_head_passes_per_step=lm_head_passes_per_step,
     )
 
     class_rows = {}
@@ -234,6 +260,11 @@ def compute_ceiling_report(
     if t_ar_ms and t_ar_ms > 0 and measured_step_ms > 0:
         speedup_over_ar = round(measured_tau / (measured_step_ms / t_ar_ms), 4)
 
+    unattributed_overhead_ms = max(measured_step_ms - t_prof_ms, 0.0)
+    unattributed_overhead_pct = (
+        round(100.0 * unattributed_overhead_ms / measured_step_ms, 2) if measured_step_ms > 0 else 0.0
+    )
+
     return {
         "device": device.name,
         "params": {
@@ -242,6 +273,10 @@ def compute_ceiling_report(
             "kv_len": kv_len,
             "weight_bytes_per_elem": weight_bytes_per_elem,
             "draft_weight_bytes_per_elem": draft_weight_bytes_per_elem,
+            "lookahead_weight_bytes_per_elem": lookahead_weight_bytes_per_elem,
+            "lookahead_trigger_rate": lookahead_trigger_rate,
+            "drafter_passes_per_step": drafter_passes_per_step,
+            "lm_head_passes_per_step": lm_head_passes_per_step,
         },
         "measured": {
             "tau": round(measured_tau, 4),
@@ -249,12 +284,15 @@ def compute_ceiling_report(
             "t_step_ms": round(measured_step_ms, 4),
             "t_prof_ms": round(t_prof_ms, 4),
             "t_floor_ms": round(t_floor_ms, 4),
+            "unattributed_overhead_ms": round(unattributed_overhead_ms, 4),
+            "unattributed_overhead_pct": unattributed_overhead_pct,
             "t_ar_ms": round(t_ar_ms, 4) if t_ar_ms else None,
             "speedup_over_ar": speedup_over_ar,
             "tok_per_s": round(1000.0 * measured_tau / measured_step_ms, 2) if measured_step_ms > 0 else 0.0,
         },
         "factors": factors,
         "dominant_factor": dominant,
+        "tau_headroom": tau_headroom,
         "weight_streaming": {
             "target_linear_gb": round(workloads["target_gemm"]["bytes"] / 1e9, 4),
             "lm_head_gb": round(workloads["lm_head"]["bytes"] / 1e9, 4),
@@ -276,6 +314,7 @@ def format_master_brief(report: dict) -> str:
         "",
         f"- **Device**: `{report['device']}` | **Verify rows**: `{report['params']['verify_rows']}` | **Draft block**: `{report['params']['draft_block']}`",
         f"- **Current speed**: `{m['tok_per_s']} tok/s` (`tau = {m['tau']}`, `T_step = {m['t_step_ms']} ms`, `T_prof = {m['t_prof_ms']} ms`, `T_floor = {m['t_floor_ms']} ms`)",
+        f"- **System Overhead / Overlap Gap (`T_step - T_prof`)**: **`{m['unattributed_overhead_ms']} ms`** (`{m['unattributed_overhead_pct']}%` of step — host glue, launch gaps, sync bubbles)",
         f"- **Three-Factor Ceiling**: **`{f['ceiling']}x`** = `tau ({f['tau_factor']}x)` × `kernel ({f['kernel_factor']}x)` × `overhead ({f['overhead_factor']}x)`",
         f"- **Dominant Bottleneck**: **`{report['dominant_factor']}`**",
         f"- **Target Weight Streaming**: `{ws['total_weight_gb']} GB` (`{ws['target_linear_gb']} GB` decoder linears + `{ws['lm_head_gb']} GB` LM head) → `{ws['floor_share_pct']}%` of floor, `{ws['measured_share_pct']}%` of measured step",
@@ -291,4 +330,21 @@ def format_master_brief(report: dict) -> str:
         lines.append(
             f"| `{cls}` | {row['bytes_gb']} | {row['floor_ms']} | {row['measured_ms']} | {row['gap_ms']} | {svf} | {row['share_of_step_pct']}% |"
         )
+    th = report.get("tau_headroom")
+    if th:
+        lines.extend(
+            [
+                "",
+                "## Acceptance Headroom (Exact Replay)",
+                "",
+                f"- **Observed `tau`**: `{th['tau_measured']}` | **Best-first `tau_best`**: `{th['tau_best']}` (`{th['tau_factor_best']}x`) | **Oracle `tau`**: `{th['tau_oracle']}` (`{th['tau_factor_oracle']}x`)",
+            ]
+        )
+        if th.get("tau_best_by_budget"):
+            curve = ", ".join(f"M={k}: {v}" for k, v in th["tau_best_by_budget"].items())
+            lines.append(f"- **Budget curve**: {curve}")
+        if th.get("lookahead_agreement_rate") is not None:
+            lines.append(
+                f"- **Lookahead agreement**: `{th['lookahead_agreement_rate']}` (est. loss: `{th['estimated_lookahead_loss_tokens']} tok/step`)"
+            )
     return "\n".join(lines) + "\n"

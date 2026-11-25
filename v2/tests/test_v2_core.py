@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from v2.phase0.floors import H100_SXM5, compute_ceiling_report, compute_class_workloads, format_master_brief
+from v2.phase0.tau_headroom import analyze_tau_headroom, best_first_tree_acceptance, oracle_step_acceptance
+from v2.sandbox.bench_1gpu import stratify_easy_hard
 from v2.sandbox.northjob_pool import attach_model_pvc, build_create_args
 from v2.sandbox.pool_worker import STOP_EVENT, run_slot_loop
 from v2.sandbox.run_gpu import pool_status, submit_and_wait
@@ -55,6 +57,100 @@ class TestPhase0Floors(unittest.TestCase):
         brief = format_master_brief(report)
         self.assertIn("Phase 0 Ceiling Brief", brief)
         self.assertIn("target_gemm", brief)
+        self.assertIn("System Overhead / Overlap Gap", brief)
+
+    def test_tau_headroom_exact_replay_and_monotonic_budget(self):
+        # Depth 0..3: target matches rank 0 at d=0, rank 1 at d=1, rank 0 at d=2, miss at d=3
+        probs = [
+            [0.8, 0.15, 0.05],
+            [0.55, 0.40, 0.05],
+            [0.70, 0.20, 0.10],
+            [0.60, 0.30, 0.10],
+        ]
+        ranks = [0, 1, 0, -1]
+        self.assertEqual(oracle_step_acceptance(ranks), 4)
+        a2 = best_first_tree_acceptance(probs, ranks, budget=2)
+        a8 = best_first_tree_acceptance(probs, ranks, budget=8)
+        a32 = best_first_tree_acceptance(probs, ranks, budget=32)
+        self.assertLessEqual(a2, a8)
+        self.assertLessEqual(a8, a32)
+        self.assertEqual(a32, 4)
+
+        res = analyze_tau_headroom(
+            steps=[{"accepted_tokens": 2, "pos_top_probs": probs, "pos_match_ranks": ranks}],
+            budgets=(4, 8, 32),
+            lookahead_agreement_rate=0.97,
+        )
+        self.assertGreaterEqual(res["tau_best"], res["tau_measured"])
+        self.assertLessEqual(res["tau_best"], res["tau_oracle"])
+        self.assertIsNotNone(res["estimated_lookahead_loss_tokens"])
+
+        # Integrate into compute_ceiling_report with lookahead & overhead gap
+        report = compute_ceiling_report(
+            measured_step_ms=36.0,
+            measured_class_ms={
+                "target_gemm": 15.4,
+                "lookahead_gemm": 11.1,
+                "lm_head": 1.4,
+                "gdn_recurrent": 1.2,
+                "attention": 0.8,
+                "drafter": 2.4,
+            },
+            measured_tau=res["tau_measured"],
+            tau_best=res["tau_best"],
+            verify_rows=32,
+            draft_block=16,
+            weight_bytes_per_elem=1.5,
+            lookahead_weight_bytes_per_elem=0.75,
+            lookahead_rows=16,
+            lookahead_trigger_rate=1.0,
+            drafter_passes_per_step=2.0,
+            lm_head_passes_per_step=2.0,
+            tau_headroom=res,
+        )
+        self.assertIn("lookahead_gemm", report["classes"])
+        self.assertAlmostEqual(report["measured"]["unattributed_overhead_ms"], 3.7, places=2)
+        brief = format_master_brief(report)
+        self.assertIn("Acceptance Headroom (Exact Replay)", brief)
+        self.assertIn("lookahead_gemm", brief)
+
+
+class TestStratifiedBenchAndProtocol(unittest.TestCase):
+    def test_stratify_easy_hard_detects_hard_regression(self):
+        per_req = [
+            {"id": "h1", "base_tau": 2.5, "cand_tau": 2.4, "ratio": 0.96},
+            {"id": "h2", "base_tau": 3.0, "cand_tau": 2.9, "ratio": 0.98},
+            {"id": "e1", "base_tau": 6.0, "cand_tau": 7.2, "ratio": 1.06},
+            {"id": "e2", "base_tau": 7.0, "cand_tau": 8.5, "ratio": 1.08},
+        ]
+        st = stratify_easy_hard(per_req)
+        self.assertTrue(st["hard_regression"])
+        self.assertGreater(st["easy"]["geomean_gain_x"], 1.05)
+        self.assertLess(st["hard"]["geomean_gain_x"], 0.99)
+
+        per_req_good = [
+            {"id": "h1", "base_tau": 2.5, "cand_tau": 3.0, "ratio": 1.04},
+            {"id": "h2", "base_tau": 3.0, "cand_tau": 3.5, "ratio": 1.03},
+            {"id": "e1", "base_tau": 6.0, "cand_tau": 7.2, "ratio": 1.06},
+            {"id": "e2", "base_tau": 7.0, "cand_tau": 8.5, "ratio": 1.08},
+        ]
+        st_good = stratify_easy_hard(per_req_good)
+        self.assertFalse(st_good["hard_regression"])
+
+    def test_master_prompt_has_plateau_escape_and_zero_hints(self):
+        prompt = (ROOT / "v2" / "agents" / "master_prompt.md").read_text()
+        for required in (
+            "Priority 0",
+            "Phase 0 Refresh",
+            "Stratified Generalization Check",
+            "Theory-vs-Implementation Triage",
+            "Plateau Escape & Co-Design Protocol",
+            "Assumption & Coupling Audit",
+        ):
+            self.assertIn(required, prompt)
+        # Must remain 100% generic (no paper/solution hints)
+        for forbidden in ("BM=32", "Huffman", "W12", "W6", "2.13x", "DFloat11"):
+            self.assertNotIn(forbidden, prompt)
 
 
 class TestSandboxPool(unittest.TestCase):

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import socket
@@ -102,6 +103,46 @@ def _run_arm(engine_dir: Path, prompts: list[dict], draft_tokens: int, extra_env
         _stop_server(proc)
 
 
+def stratify_easy_hard(per_req: list[dict]) -> dict:
+    """Split per-request results into Easy (high baseline tau) and Hard (low baseline tau) buckets.
+
+    Zero extra GPU runtime; exposes dev-set regime overfitting before Sealed evaluation.
+    """
+    if not per_req:
+        return {"easy": None, "hard": None, "hard_regression": False}
+
+    def _key(r: dict) -> float:
+        if r.get("base_tau") is not None:
+            return float(r["base_tau"])
+        return float(r.get("base_tps", 0.0))
+
+    ordered = sorted(per_req, key=_key)
+    mid = max(1, len(ordered) // 2)
+    hard_rows = ordered[:mid]
+    easy_rows = ordered[mid:] if len(ordered) > 1 else ordered
+
+    def _agg(rows: list[dict]) -> dict:
+        ratios = [max(float(r["ratio"]), 1e-6) for r in rows]
+        gm = math.exp(sum(math.log(x) for x in ratios) / len(ratios))
+        base_taus = [float(r["base_tau"]) for r in rows if r.get("base_tau") is not None]
+        cand_taus = [float(r["cand_tau"]) for r in rows if r.get("cand_tau") is not None]
+        return {
+            "count": len(rows),
+            "geomean_gain_x": round(gm, 4),
+            "avg_base_tau": round(sum(base_taus) / len(base_taus), 4) if base_taus else None,
+            "avg_cand_tau": round(sum(cand_taus) / len(cand_taus), 4) if cand_taus else None,
+            "request_ids": [r["id"] for r in rows],
+        }
+
+    hard_agg = _agg(hard_rows)
+    easy_agg = _agg(easy_rows)
+    return {
+        "easy": easy_agg,
+        "hard": hard_agg,
+        "hard_regression": hard_agg["geomean_gain_x"] < 0.99,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worktree", type=Path, required=True)
@@ -146,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     gain_x = round(cand["avg_tok_per_s"] / max(base["avg_tok_per_s"], 1e-6), 4)
+    stratified = stratify_easy_hard(per_req)
     summary = {
         "worktree": str(args.worktree),
         "option_env": cand_env,
@@ -154,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         "baseline": {k: v for k, v in base.items() if k != "rows"},
         "candidate": {k: v for k, v in cand.items() if k != "rows"},
         "gain_x": gain_x,
+        "stratified": stratified,
         "exact_matches": f"{exact_matches}/{len(prompts)}",
         "passes_3pct_tier3": gain_x >= 1.03,
         "per_request": per_req,
