@@ -1,5 +1,18 @@
 # SpecPilot 复现工程
 
+## H100最新：SpecPilot v2 全盲测自主优化闭环完成（Round 1–4，2026-11-25）
+
+- **已完成**：构建 SpecPilot v2 自主闭环（`v2/`：Phase 0 硬件精确三因子 Ceiling、8×H100 持久探索池、严格盲测 Master + 多路并行 Direction、隔离 2×H100 Controller T1/T2、Phase 4 T3 Sealed Final、T4 Structured Memory 逐字节还原校验），完成 **Round 1–4** 全盲测独立优化与验证（审计 0 次联网、0 次读禁区）。
+- **核心成果（R4 修复版 `r4-blind-d6-fix-v1`）**：
+  - **独立 Dev Controller（30-req 2048-cap 双卡互换）**：**`1.7068×` `[1.6574, 1.7580]`**（**`326.97 tok/s`** vs Stock `190.41 tok/s`，`6.34×` AR，$\tau: 4.65 \to 10.05$）；FP32 LM-head Token Forcing 不匹配率 `0.6739%`（低于 Stock `0.7824%`），**`0` 大 margin 事件**（`promoted = true`）。
+  - **Token Forcing 实证拦截与闭环修复**：R4 初版（`331.87 tok/s`）因深树 TF32 Neumann 级数倍增灾难性相消触发 `15` 个大 margin 事件被 Controller 严格拒绝；盲测调试代理定位根因并改为精确 FP32 subwarp 反向三角求解后清零事件并晋升，且已将“优先处理上一轮 T1 有损候选”固化为 [v2/agents/master_prompt.md](v2/agents/master_prompt.md) 的 Priority 0 规则。
+  - **Phase 4 T3 Sealed Final（30 条严格未见请求）**：**`1.6700×` `[1.6273, 1.7148]`**（**`292.05 tok/s`** vs Stock `174.84 tok/s`，$\tau: 4.26 \to 8.70$）；未见集 2048-cap（`0.9042%` / `0` events）与 4096-cap 长序列（`0.9175%` / `0` events）双重 FP32 Token Forcing 全部通过（`sealed_final_passed = true`）。
+  - **T4 Structured Memory**：`r1_tree_gdn_b12 → r2_w12_gdnv2_fp8draft → r3_tree_wy_attn → r4_w6v2_adaptive_fixed` 四代传递重建 `TREE_SHA` **逐字节完全一致**（`byte_exact_match = true`）；5/5 `v2/tests` 单元测试通过。
+- **正在做**：无活动 GPU 阻塞任务；核心自主闭环已封板提交。
+- **接下来（可选）**：按需补跑论文 §6.1 对比消融（Single-Agent 无 Cost Model / Memory Transfer），或基于 R4 基线重测三因子 Ceiling 启动盲测 Round 5。
+
+完整实验记录、演进总表与 NorthJob UUID 见 [SpecPilot v2 全盲测闭环记录](docs/experiments/specpilot-v2-blind-r1-r4-20261125.md)。
+
 ## H100最新：Master重新评估与提案已完成（2026-11-13）
 
 - **已完成**：Master实际核对23个来源、比较四维五种机制，给出QKVZ＋BA联合投影首版；7项CPU检查/1944组合通过，维护者独立副本重放两份输出一致，4项入口与8项审计回归通过。
@@ -61,6 +74,14 @@
 
 见[原生Master入口](docs/experiments/master-native-access-20261112.md)。prompt-only不保证未读取禁区；下方旧阶段“正在做”以各阶段实际停止回执为准。
 
+## H100正在做：真实Master链长复核（2026-11-12）
+
+- **已完成**：458项入口回归，真实Master主动取证后派Direction检查训练长度与运行长度、实际缓冲/状态契约。
+- **正在做**：同一Direction自主实现/自检/修复，必要真实任务走新8GPU小时/8小时/2卡预算与可信准入。
+- **接下来**：有候选再做独立controller正确性与配对性能；不把已知线索当新发现，不预设16可用或更快，不进入sealed。
+
+实际状态和任务索引见[本阶段记录](docs/experiments/chain-review-20261112.md)，不是GPU正确性或收益已通过。
+
 ## H100最新：Master决策审查已接通（CPU，2026-11-12）
 
 - **已完成**：新开放研究入口要求真实来源、条件收益/新增成本、否定判断反例取证、失败分类与最小实验；接受/拒绝均可离线复核。
@@ -104,7 +125,7 @@ GitHub：[china-qijizhifeng/SpecPilot-reproduction](https://github.com/china-qij
 代码与范围见[Ascend适配器](harness/ascend_dsh/README.md)、[阶段记录](docs/experiments/ascend-ctrip-dsh-20261109.md)及[当前计划](PLANS.md)。本轮研究流程收尾不等于性能优化目标达成。
 Ascend容器缺少旧H100工作路径且不支持Landlock，该环境合并后303项回归未全过（12失败/29错误）；新适配器采用经实测的chroot/降权/seccomp，不宣称该环境全量通过。
 
-以下为H100独立轨道：既有321项回归与10项新增Phase 0检查通过，不代表Ascend环境全量通过；两者指标、预算和待办不混算。
+以下为H100独立轨道：本次374项指定CPU检查通过，不代表仓库全量或Ascend环境全量通过；两者指标、预算和待办不混算。
 
 ## H100进度（2026-11-11，UTC+08）
 
@@ -148,15 +169,6 @@ Direction写了脚本但运行被动作额度拒绝，实际CPU脚本执行0次�
 242项指定CPU检查及两次独立审计通过；额度简报/近名反馈绑定已修复，但修复版尚未真实研究复验。
 实际未覆盖revise/continue，旧GPU流水线仍待动态接入；完整RSI与论文sealed数字均未复现。
 
-**最新离线诊断：**[长上下文收益收窄](docs/experiments/prefix-diagnosis-20261111.md)：200份HTTP复核通过，
-final外层周期推进量中位数original→64K为12.95→12.59，未见整体接受量崩塌。
-prefill与decode Attention贡献仍未知；没有新增GPU任务，精确阶段归因待另行批准补采。
-
-**最新完成控制实验：**[公开原题加干扰前缀](docs/experiments/prefix-context-20261111.md)：同10题，original/2K/8K/32K/64K，
-final/stock为**2.179/2.028/1.945/1.462/1.164×**，100pair、200输出的forcing检查通过；64K仍有单题吞吐回退。
-TPS含prefill，不代表纯decode或每题都提速；质量代理发现数学格式盲点，不能宣称语义质量完全不变。
-39项CPU检查及公开副本通过，1.96778 H100 GPU小时，本阶段GPU已释放。
-
 **Master主线已执行：**[四维源码提案与自主反馈](docs/experiments/master-proposal-20261111.md)：
 Master评估“验多少/验哪些/kernel/端到端”，Direction自主实现向量归约诊断，CPU模型5924例通过；
 双卡两轮换卡测得 **0.9956× [0.9933,0.9980]**，不支持收益，Master最终stop。
@@ -165,6 +177,15 @@ Kernel自主补采/BBuf后因路径证据不足停止，Integration无共享候�
 收尾registry错误保留并做事后退出复核，不冒充Phase4预打开许可。
 371项指定CPU回归通过；不代表仓库全量或GPU正确性验收通过。
 接下来待审核：补足真实调用路径/形状及无profiler成本证据，再由Master自主选择下一方向；不自动续交GPU。
+
+**最新离线诊断：**[长上下文收益收窄](docs/experiments/prefix-diagnosis-20261111.md)：200份HTTP复核通过，
+final外层周期推进量中位数original→64K为12.95→12.59，未见整体接受量崩塌。
+prefill与decode Attention贡献仍未知；没有新增GPU任务，精确阶段归因待另行批准补采。
+
+**最新完成控制实验：**[公开原题加干扰前缀](docs/experiments/prefix-context-20261111.md)：同10题，original/2K/8K/32K/64K，
+final/stock为**2.179/2.028/1.945/1.462/1.164×**，100pair、200输出的forcing检查通过；64K仍有单题吞吐回退。
+TPS含prefill，不代表纯decode或每题都提速；质量代理发现数学格式盲点，不能宣称语义质量完全不变。
+39项CPU检查及公开副本通过，1.96778 H100 GPU小时，本阶段GPU已释放。
 
 **最新完成：**[冻结作者final长上下文检查](docs/experiments/long-context-20261111.md)：3篇公开英文小说、两轮换卡、输出cap2048。
 2K/8K/32K/64K的final/stock分别**2.147×/1.818×/1.534×/1.319×**，48输出的94092 token forcing检查通过。
@@ -243,6 +264,8 @@ Kernel自主补采/BBuf后因路径证据不足停止，Integration无共享候�
 **最新完成：**[真实stock引擎自主探索](docs/experiments/engine-autonomy-20261109.md)。Master自行选方向，direction自行设计、编写CPU分析、执行并迭代2048-token研究；12与10均通过原controller的30题dev联合验收，测速输出与stock一致。Master主动停止，不耗完预算；8任务均Completed/exit0，保守6.314 GPU小时、峰值2卡。完整进度见 [PLANS.md](PLANS.md)。
 
 **最新完成：**[Phase 0诊断采集](docs/experiments/ceiling-20261110.md)：40pair/80臂行输出一致，20份完整请求profile、20份真实lattice重放、80故障拒绝及两次独立CPU审计通过；331项定向CPU检查通过。stock条件接受量4.8604，32节点树5.9877（+23.2%），**不是实测速率提升**。两任务已终止，含失败共1.9189 H100 GPU小时。
+
+**本轮已完成的测量输入：**[完整ceiling执行记录](docs/experiments/ceiling-complete-20261110.md)：低干扰时钟换卡对照、10题已观测GPU kernel集合的名义工作量映射、20pair原缓存观测及5290有效步的独立FP32参考重放。stock条件τ=4.8604，N32树接受量区间[5.9312,6.0301]，不是加速比或95%CI。本阶段11任务均已终态，含失败共3.70056 H100 GPU小时。
 
 **最新完成：**[最小 Skills 离线接入与研究简报](docs/experiments/skills-diagnostics-20261110.md)：固定 BBuf 工具版本，89391 个真实 stock kernel 的计数/累计时间/并集/跨度与原记录一致；计算估算与4个投影/FFN手算核对，52项定向检查通过。真实层归因未适配，工具阶段标签不直接采信，本阶段新增GPU为0，不代表研究agent已自主调用。
 

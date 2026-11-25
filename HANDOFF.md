@@ -1,5 +1,15 @@
 # HANDOFF — 交接给新 session
 
+## H100最新收口：SpecPilot v2 全盲测闭环（Round 1–4，2026-11-25）
+
+已完成 SpecPilot v2 完整自主闭环（`v2/`）及 Round 1–4 严格盲测独立优化与验证（审计 0 联网、0 读禁区、`controller/` 与 `eval/sealed/` 未修改）。
+- **最高正式晋升且封板版本**：`r4-blind-d6-fix-v1`（工作树 `v2_runtime/round4_blind/worktrees/d6_fix`，相对 `stock` 全部由 default-OFF `SP_OPT_*` 控制，关开关 30/30 prompts 逐 token 复现 `stock`）。
+- **独立 Dev Controller T1/T2**（`job-9f2490ce5d07-20261125162408`）：`1.7068× [1.6574, 1.7580]`，`326.97 tok/s`（`6.34×` AR，$\tau=10.05$）；FP32 Token Forcing `0.6739%`、`0` large-margin events（`event_p=1.0`，`promoted=true`）。
+- **R4 T1 拦截与闭环修复**：R4 初版（`job-dd5567e768ef-20261125143820`，`1.7312×`）因 `gdn_verify_fast_tree_wy_cuda_kernel` 在 depth 20–31 下 5 步 TF32 Neumann 倍增灾难性相消触发 15 个大 margin 事件被 Controller 拒收；盲测调试代理改为精确 FP32 subwarp 反向三角求解并修复 `M_q=16` `_capture_metadata` 树缓冲绑定后清零事件通过。该工作流已固化进 `v2/agents/master_prompt.md`（Priority 0：先处理上一轮 T1 有损遗留，再重测 Ceiling 决定新方向）。
+- **Phase 4 T3 Sealed Final**（`sp-v2-sealed-r4-fix-20261125-a01`）：30 条严格未见集 `1.6700× [1.6273, 1.7148]`（`292.05 tok/s`，$\tau=8.70$）；2048-cap（`0.9042%` / `0` events）与 4096-cap（`0.9175%` / `0` events）双重 Token Forcing 通过（`sealed_final_passed=true`）。
+- **T4 Structured Memory**：`r1_tree_gdn_b12 → r2_w12_gdnv2_fp8draft → r3_tree_wy_attn → r4_w6v2_adaptive_fixed` 从干净 `stock` 传递重建 `TREE_SHA = a6b67a779cd996531cd2ac306425efcd57d6a59df2995f26fa1e92201ceaa273`，`byte_exact_match=true`。
+- **接续选项**：(1) 补跑论文 §6.1 消融（Single-Agent 无 Cost Model / Memory Transfer）；或 (2) 基于 R4 基线重测 Phase 0 三因子 Ceiling 并开启盲测 Round 5。详见 `docs/experiments/specpilot-v2-blind-r1-r4-20261125.md`。
+
 ## H100最新收口：Master重新评估与提案（2026-11-13）
 
 用户批准先让Master基于新知识重新生成/论证，不直接执行旧chain12建议。唯一目录`logs/master-replan-20261113-a01/`，基准9b65771，旧62份工作/三个共享文件原文/保护文件快照已保存，先写ACCEPTANCE.md，4项入口检查通过。
@@ -107,6 +117,17 @@ controller/账本/指定规则事后摘要未变；角色已关闭，原始resea
 旧链长轮已停止：两任务终态共3090GPU秒；首次CLI登记超时、精确查重接管及原needs_attention均保留。
 链长恢复Master已正常stop，无完整候选配对、无controller正确性/收益；完整旧阶段工程审计与归档尚待收尾，不宣称已完成。
 新研究应使用原生入口；旧CLI入口仍保留旧约束，未伪称热更新。发布身份见本目录publication回执。见`docs/experiments/master-native-access-20261112.md`。
+
+## H100正在执行：真实Master链长复核（2026-11-12）
+
+用户新批8GPU小时/8小时/并发2卡，镜像digest/WeaverDev/qiji/只读模型/toleration/priority=3均确认，不结转旧余额。
+唯一目录`logs/chain-review-20261112-a01/`，唯一资源账本`resource-state.json`；TTY运行`exp.chain_review`，不要重复启动。
+458项入口回归后真实Master已取证并派同一Direction核查链长；代码版本为b1930ce加实际冻结overlay，不是新提交已生效。
+已知论文线索为维护者明确共享，不算独立发现，不代表本地兼容/正确/更快；完整旧启动日志只授权给Master。
+新研究执行同一Direction续轮/自行修复、新Master决策检查、必要时controller既有dev gate；不扩展tree/integration/kernel或sealed。
+任务以admission-plan/可信查重准入/code200/UUID/实际生命周期为准；研究角色不能直接NorthJob，不自动提交待准入任务。
+状态以pipeline-result/counters/resource-state和实际进程为准；当前不能宣称GPU研究、正确性或收益已通过。
+原47份dirty保留，不接管Ascend；计划见`docs/experiments/chain-review-20261112.md`。
 
 ## H100最新收口：Master决策审查（CPU，2026-11-12）
 
@@ -558,6 +579,46 @@ Master最终stop，6科学角色/15原生回合/80工具动作/5次BBuf调用；
   单项/组合/kernel 变体分别过独立 controller dev 正确性/forcing 与配对性能，最终冻结后用 sealed。
   本阶段仅维护者离线入口，不开放整个原始证据目录，不代写 direction 的研究。
 - 旧 ceiling/source 未提交代码仍保留；本阶段发布不夹带这些代码或 Ascend 未提交修改。
+
+## H100历史checkpoint：完整ceiling扩展（不再自动补采）
+
+下文是旧冻结节点；当前任务状态与决策以上方 Skills 接续点为准。
+
+- 最新扩展进度：用户已批准最小真实树测量通路。b12/b13预热批次guard、b14动态分支输入形状失败均保留；
+  b15 `job-2cff0e653192-20261110190219` Completed/exit0，单题完整输出与stock一致，原缓存下
+  N8/16/32/64/128的真实树、线性退化及抽检分支对照通过；不是lossless或完整ceiling验收。
+  target-only profile含设备copy/memset的工作量已无漏项，主报告仍不放行formal三因子。
+- b16 `job-0dbe1e2bb797-20261110192838` 已code200/启动，当前仍运行，**不要重复提交**。
+  `logs/ceiling-complete-run-20261110-b01/sp-ceiling-complete-20261110-b16/`；可信host监控入口仍在前台。
+  协议：10题×每题3个预定verify位置×两轮物理换卡，五档预算，逐叶独立线性对照；
+  另含两轮默认关闭对照。单任务3600秒硬期限，仍属原16 GPU小时／12小时／2卡预算。
+- b01–b15已终态，累计18022 GPU秒（5.00556小时）；b16尚未结算，不能把它算通过或零费用。
+  当前389项指定CPU检查通过（86定向+303既有），非整个仓库全量；保护目录无改动，旧source修改SHA保持。
+  b01–b15归档35402文件/1557213384字节及12符号链接，两次全SHA通过；清单
+  `logs/ceiling-complete-archive-20261110-b01/b01-b15-manifest.jsonl`，SHA为
+  `717e1a228676ae33e41cbe55e6db862ec14f3b0d6a02c8e7a77d26d3f6a5b407`。不含仍活动的b16。
+  b11旧checkpoint已从冻结源码独立重组，与旧报告仅规范化预算快照路径后完全一致。
+  尚未commit/push；本轮新文件和其他来源的source未提交修改必须分开。下方b01–b11为历史checkpoint。
+
+- 用户已批准完整跑通目标及新的16 H100 GPU小时／12小时／并发2卡，资源配置全部沿用。
+  当前执行契约见`docs/experiments/ceiling-complete-20261110.md`，预算目录
+  `logs/ceiling-complete-run-20261110-b01/`，不结转旧余额。
+- 当前是输入复核完成、严格完整ceiling未通过的checkpoint，不是目标完成。主报告
+  `logs/ceiling-complete-prep-20261110-b01/assembled-native-03.json`明确formal三因子/ceiling=null；
+  不得把名义树成本与stock profile混成正式分解。阶段文档列出可执行重放及缺项。
+- 本阶段b01–b11均已终态，含失败13322 GPU秒（3.70056小时），无活动GPU。b11为
+  `job-aaa257d1ab5e-20261110165814`，Completed/exit0；20pair输出一致，原缓存5290有效步、18尾步排除，
+  独立FP32参考N32接受量[5.9311516,6.0300822]、stock τ=4.8604073。不是速度CI或自主发现。
+- b06低干扰时钟/stock比0.996672 [0.994229,0.998794]；主请求摊销步时24.421937ms，
+  纯decode诊断24.027741ms，不能混用。b07的10题已观测kernel工作量名义模型无漏项，
+  不等于所有floor已独立验证；GPU memcpy/memset与prefill精度问题单列。
+- b08快照寿命、b09全局序号邻接假设错误已实证修复；旧失败与旧原始数据不改写。
+  b11首次host收尾因冻结审计模块白名单缺native而报错；GPU采集已成功，仅CPU补审，不重复提交。
+- 继续严格完整ceiling需要真实树预算成本及同工作量profile，不能拿外推值放行。
+  用户已批准补“仅用于测量的最小真实树执行/profile通路”；正在先验收父状态、祖先mask和缓存恢复，再采真实成本。
+  原16小时/12小时/2卡上限不变，旧余额不能在新阶段自动结转；先核对resource-state及墙钟期限。
+- 374项指定CPU检查通过；不宣称仓库全量通过，额外KV测试曾因dev环境缺torch而无法导入，未改无关测试。
+  不启动科学角色/优化/Integration/Kernel/sealed，不接管Ascend；旧source未提交修改保留。
 
 ## H100历史：Phase 0诊断采集收口，完整ceiling仍缺
 

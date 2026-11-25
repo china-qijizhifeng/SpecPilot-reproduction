@@ -9,6 +9,7 @@ work/
 runs/
 logs/
 RUN/
+v2_runtime/
 *.log
 profiles/
 *.nsys-rep

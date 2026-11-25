@@ -9,6 +9,17 @@
 
 # 当前执行计划
 
+## 已完成：SpecPilot v2 全盲测自主优化闭环（Round 1–4，2026-11-25）
+
+- [x] 构建 `v2/` 基础设施：Phase 0 硬件精确三因子 Ceiling、8×H100 持久探索池、隔离 worktree、2×H100 Dev Controller（T1+T2）、Phase 4 T3 Sealed Final、T4 Structured Memory 逐字节校验，5/5 单元测试通过。
+- [x] 完成 Round 1–4 严格盲测自主优化（0 联网、0 读禁区），独立重发现 Best-first Tree、Zero-snapshot / Tree-WY GDN、无损 12-bit BF16（W12）、FP8 Drafter、W6 两级 Lookahead。
+- [x] R4 初版被 T1 Token Forcing 捕获 15 个大 margin 事件并严格拦截；盲测修复深树 TF32 Neumann 级数灾难性相消与 `M_q=16` CUDA Graph 绑定后，Dev Controller `1.7068× [1.6574, 1.7580]`（`326.97 tok/s`，`0` events，`promoted=true`）。
+- [x] 完成 Phase 4 T3 Sealed Final（未见集 `1.6700× [1.6273, 1.7148]`，`292.05 tok/s`，2048 & 4096 Forcing 均为 `0` events，`sealed_final_passed=true`）与 T4 Structured Memory 四代传递重建 `byte_exact_match=true`。
+- [x] 将“Priority 0：优先处理上一轮 T1 有损候选，再重测 Ceiling 决定新方向”固化至 `v2/agents/master_prompt.md`，更新文档并同步公开仓库。
+- [ ] 可选下一步：补跑论文 §6.1 对比消融（Single-Agent 无 Cost Model / Memory Transfer），或基于 R4 基线重测三因子 Ceiling 开启盲测 Round 5。
+
+详见 `docs/experiments/specpilot-v2-blind-r1-r4-20261125.md`。
+
 ## 已完成：Master重新评估与提案（2026-11-13）
 
 - [x] 用户批准0GPU重新提案而非执行旧推荐；冻结基准9b65771、旧62份工作与保护文件，82份输入/工具、40来源入口，4项入口检查通过。
@@ -81,6 +92,14 @@
 - [ ] 后续另布置自主方案评估，不把能力探针当研究成果，不自动启动GPU。
 
 本次0GPU，旧链长轮已停止；原失败与恢复记录保留，旧阶段完整工程收尾尚未完成。原生入口不保证强制数据隔离。
+
+## H100正在执行：真实Master链长复核（2026-11-12）
+
+新8GPU小时/8小时/2卡及既有镜像/调度已确认，唯一目录`logs/chain-review-20261112-a01/`。
+- [x] 保留旧47份dirty；458项入口回归；真实受限Master已主动读stock/公开资料并派Direction。
+- [ ] Direction同会话自主写验收、实现/实验/修复，完整反馈，不由维护者代做科学实现。
+- [ ] 有依据后独立controller既有dev正确性与配对性能；不扩展tree/integration/kernel或sealed。
+- [ ] 最终原生/源码/预算/退出审计、持久归档和公开同步；不重启旧会话或结转余额。
 
 ## H100已收口：Master研究决策要求（CPU，2026-11-12）
 
@@ -367,6 +386,29 @@ stock profile并调用BBuf后因真实路径/形状仍未知停止；Master最�
 controller独立验收；不预设优化VERIFY，不以外部Skill复用冒充独立发现。
 每个拟保留单项、组合、kernel变体均须dev正确性/token forcing与配对性能，最终冻结才用sealed。
 后续GPU使用`--k8s-priority 3`（`higher-priority-job`），不保证免抢占；新预算/镜像另行确认。
+
+## 历史checkpoint：完整 Phase 0 ceiling 扩展
+
+以下为旧冻结节点，b16/b17最终均被抢占；不恢复为待办，不因本阶段工具通过翻为完整ceiling通过。
+
+用户已批准完整目标并新确认16 H100 GPU小时／12小时／并发2卡，全部沿用已确认资源配置。
+旧a01采集预算已结束，不结转；Ascend独立。计算契约与先行验收见
+[完整ceiling计划](docs/experiments/ceiling-complete-20261110.md)。
+
+- [x] 冻结计算契约并通过CPU手算、overlap、图节点关联和拒绝漏项测试；运行时预算策略尚待证据支撑。
+- [x] 真实GPU图节点映射、运行时元数据及10题已观测kernel工作量名义模型；不把模型覆盖率当科学验收。
+- [x] 独立时钟换卡、FP32 teacher、原缓存lattice重放与严格拒绝不同工作量的统一报告入口。
+- [x] b15最小真实树target-only单题预检：五档预算、原缓存分支对照/回滚和同工作量profile；不是完整ceiling。
+- [ ] b16多题/逐叶/换卡及默认关闭验证；任务已启动，UUID与状态以HANDOFF及唯一预算为准，不重复create。
+- [ ] 真实树预算成本和同工作量profile；prefill精度口径完成独立核对。
+- [ ] 真实stock完整运行，三个因子均有可靠数值/有依据区间；未知不算完成。
+- [ ] 双进程重算、故障拒绝、预算/终态/归档及README/HANDOFF/GitHub同步。
+
+当前checkpoint：b01–b11均已终态、无活动GPU，累计13322 GPU秒；374项指定CPU检查通过。
+原缓存20pair/5290有效步经独立FP32参考复核，N32接受量[5.9312,6.0301]，不是性能区间。
+完整目标仍未通过：stock profile与假想树floor不是同一工作量，正式三因子/乘积保持null。
+用户已批准扩展最小真实树执行/profile测量通路；先验收树结构、逐分支对照和缓存恢复，
+不启动优化搜索、科学角色或sealed，不把本轮输入复核或条件模型算作完整Phase 0。
 
 ## 已收口历史：Phase 0 ceiling证据采集
 
