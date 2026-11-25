@@ -1,16 +1,17 @@
 # SpecPilot 复现工程
 
-## H100最新：SpecPilot v2 全盲测自主优化闭环完成（Round 1–5 + §6.1 消融，2026-11-25）
+## H100最新：SpecPilot v2 全盲测闭环 + P0/P1 系统升级破局（Round 1–6 + §6.1 消融，2026-11-25）
 
-- **已完成**：构建 SpecPilot v2 自主闭环（`v2/`：Phase 0 硬件精确三因子 Ceiling、8×H100 持久探索池、严格盲测 Master + 多路并行 Direction、隔离 2×H100 Controller T1/T2、Phase 4 T3 Sealed Final、T4 Structured Memory 逐字节还原校验），完成 **Round 1–5** 全盲测独立优化、硬件屋顶收敛停机及 **§6.1 无 Cost Model 单 Agent 消融**（审计 0 次联网、0 次读禁区）。
-- **核心成果（R4 自适应 / R5 全开两级 Lookahead，均 0 大 margin 事件）**：
-  - **独立 Dev Controller（30-req 2048-cap 双卡互换）**：R5（`r5-blind-mode2-nosync-v1`）达到 **`1.7313×` `[1.7006, 1.7654]`**（**`334.96 tok/s`** vs Stock `190.32 tok/s`，`6.49×` AR，$\tau: 4.65 \to 12.20$，`0` events，`promoted = true`）；R4（`r4-blind-d6-fix-v1`）为 `1.7068× [1.6574, 1.7580]`（`326.97 tok/s`，`0` events）。
-  - **Phase 4 T3 Sealed Final（30 条严格未见请求 + 4096-cap Forcing）**：R4 自适应 `MODE=1` 达 **`1.6700×` `[1.6273, 1.7148]`**（**`292.05 tok/s`**，$\tau: 4.26 \to 8.70$），R5 `MODE=2` 达 **`1.6488×` `[1.6005, 1.6964]`**（`290.52 tok/s`，$\tau=10.54$）；两者在未见集 2048-cap 与 4096-cap 长序列 FP32 Token Forcing 上均为 **`0` 大 margin 事件**（`sealed_final_passed = true`）。
-  - **Token Forcing 实证拦截与 Priority 0 规则**：R4 初版（`331.87 tok/s`）因深树 TF32 Neumann 级数倍增灾难性相消触发 `15` 个大 margin 事件被 Controller 严格拒绝；盲测调试代理改为精确 FP32 subwarp 反向三角求解后清零事件并晋升，且已将“优先处理上一轮 T1 有损候选”固化为 [v2/agents/master_prompt.md](v2/agents/master_prompt.md) 的 Priority 0 规则。
-  - **T4 Structured Memory**：`r1 → r2 → r3 → r4 → r5_mode2_nosync` 五代传递重建 `TREE_SHA` **逐字节完全一致**（`byte_exact_match = true`）；5/5 `v2/tests` 单元测试通过。
-  - **论文 §6.1 对照消融（无 Cost Model 单 Agent）**：同一干净 `stock` 起点、严格盲测 3 轮串行探索，最强方案（`block_size=16 + FlashInfer GDN`）经同一 2×H100 Controller 测得 **`1.1173×` `[1.0809, 1.1590]`**（`209.79 tok/s`，$\tau=5.30$，`promoted = true`）；SpecPilot 完整架构仅首轮即 **`1.2960×`**（`+16.0%`，95% CI 无重叠），5 轮达 **`1.7313×`**（`+55.0%`）。
-- **正在做**：Round 5 已实证 4 条无损优化轴全部抵达 H100 物理/算法 Pareto 边界，Master 有据停机；项目已封板收官。
-- **接下来（可选）**：扩展 Memory Transfer 跨模型测试或新硬件平台迁移。
+- **已完成**：构建 SpecPilot v2 自主闭环（`v2/`：Phase 0 完整双端三因子 Ceiling、8×H100 持久探索池、Easy/Hard 分层 Tier-3、P1 平台期破局与 Co-Design 协议、隔离 2×H100 Controller T1/T2、Phase 4 T3 Sealed Final、T4 Structured Memory 逐字节还原校验），完成 **Round 1–6** 全盲测独立优化及 **§6.1 无 Cost Model 单 Agent 消融**（审计 0 次联网、0 次读禁区）。
+- **核心成果（最高正式晋升且封板版本：Round 6 `r6-blind-d3d5-v1`）**：
+  - **独立 Dev Controller（30-req 2048-cap 双卡互换）**：**`1.7741×` `[1.7377, 1.8129]`**（**`342.46 tok/s`** vs Stock `190.39 tok/s`，`6.64×` AR，$\tau: 4.65 \to 12.07$）；FP32 Token Forcing 不匹配率 `0.7403%`（低于 Stock `0.7824%`），**`0` 大 margin 事件**（`promoted = true`）。
+  - **Phase 4 T3 Sealed Final（30 条严格未见请求 + 4096-cap Forcing）**：**首次突破 `1.70×`，达 `1.7036×` `[1.6531, 1.7541]`**（**`298.95 tok/s`** vs Stock `173.74 tok/s`，$\tau: 4.26 \to 10.43$，超越 R4 `1.6700×` 与 R5 `1.6488×`）；未见集 2048-cap 与 4096-cap 长序列 FP32 Token Forcing 均为 **`0` 大 margin 事件**（`sealed_final_passed = true`）。
+  - **P0 + P1 通用系统升级实证**：在 R5 原本停机的平台期，仅升级通用的双端三因子 Ceiling（显式量化 `T_step - T_prof` 气泡）、Easy/Hard 分层测速与 Plateau Escape 协议（0 算法剧透），R6 盲测即自主把两级前瞻 GPU 空闲气泡砍掉 `-91.7%`（`4.57→0.38 ms`）并设计零同步 EWMA 自适应门控，在 Dev 与 Sealed 上双双创新高。
+  - **Token Forcing 实证拦截与 Priority 0 规则**：R4 初版（`331.87 tok/s`）因深树 TF32 Neumann 级数倍增灾难性相消触发 `15` 个大 margin 事件被 Controller 严格拒绝；盲测调试代理改为精确 FP32 subwarp 反向三角求解后清零事件并晋升，已固化为 [v2/agents/master_prompt.md](v2/agents/master_prompt.md) 的 Priority 0 规则。
+  - **T4 Structured Memory**：`r1 → r2 → r3 → r4 → r5 → r6_la_pipeline_ewma` 六代传递重建 `TREE_SHA` **逐字节完全一致**（`byte_exact_match = true`）；8/8 `v2/tests` 单元测试通过。
+  - **论文 §6.1 对照消融（无 Cost Model 单 Agent）**：同一干净 `stock` 起点、严格盲测 3 轮串行探索，最强方案经同一 2×H100 Controller 测得 **`1.1173×` `[1.0809, 1.1590]`**（`209.79 tok/s`，`promoted = true`）；SpecPilot 完整架构仅首轮即 `1.2960×`（`+16.0%`，95% CI 无重叠），6 轮达 **`1.7741×`**（`+58.8%`）。
+- **正在做**：Round 6 已完成全链路封板提交。
+- **接下来（可选）**：继续补齐 **P2（通用 Kernel Specialist + `ncu` 深度打磨循环）** 与 **P3（双向条件负向 Memory 错题本）**，进一步提升系统自主攻克高难度底层算子的能力。
 
 完整实验记录、演进总表与 NorthJob UUID 见 [SpecPilot v2 全盲测闭环记录](docs/experiments/specpilot-v2-blind-r1-r4-20261125.md)。
 

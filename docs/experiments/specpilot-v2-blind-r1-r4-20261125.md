@@ -24,7 +24,8 @@
 | **Round 3** | All-MMA Tree-WY GDN + Fused GQA Suffix Tree Attention | `1.6260× [1.5848, 1.6717]` (`319.77`, $\tau=6.83$) | `0.7378%` / `0` | `1.5745× [1.5440, 1.6080]` (`279.12`, $\tau=5.95$) | `0` / `0` | `r3_tree_wy_attn` (`true`) | `PROMOTED` + `SEALED` |
 | **Round 4（初版，被拒）** | Fast `sm_90` W6-v2 两级 Lookahead + 非对称 `M_q=16` 自适应 | `1.7312× [1.6901, 1.7736]` (`331.87`, $\tau=10.28$) | `0.9653%` / **`15` (`p=1.87e-5`)** | — | — | 未入库 | **`REJECTED (T1)`** |
 | **Round 4（修复版）** | 同上 + **精确 FP32 subwarp 反向三角 WY 求解** + `M_q=16` CUDA Graph 树缓冲捕获修复 | **`1.7068× [1.6574, 1.7580]`** (**`326.97`**, $\tau=10.05$, `6.34×` AR) | **`0.6739%` / `0` (`p=1.0`)** | **`1.6700× [1.6273, 1.7148]`** (**`292.05`**, $\tau=8.70$) | **`0` / `0` (`p=1.0`)** | **`r4_w6v2_adaptive_fixed` (`true`)** | **`PROMOTED` + `SEALED`** |
-| **Round 5（收官轮）** | Always-On 2-Pass (`MODE=2`) + 消除 2-pass `.item()` GPU-CPU 同步（`SP_OPT_W6_CACHE_NUM_TOK_CPU=1`）；同步在硬件屋顶证伪 D1/D2/D3/D5 四条路径 | **`1.7313× [1.7006, 1.7654]`** (**`334.96`**, $\tau=12.20$, `6.49×` AR) | **`0.8057%` / `0` (`p=1.0`)** | `1.6488× [1.6005, 1.6964]` (`290.52`, $\tau=10.54$) | **`0` / `0` (`p=1.0`)** | **`r5_mode2_nosync` (`true`)** | **`PROMOTED` + `SEALED` + 停机收官** |
+| **Round 5** | Always-On 2-Pass (`MODE=2`) + 消除 2-pass `.item()` GPU-CPU 同步（`SP_OPT_W6_CACHE_NUM_TOK_CPU=1`）；同步在硬件屋顶证伪 D1/D2/D3/D5 四条路径 | `1.7313× [1.7006, 1.7654]` (`334.96`, $\tau=12.20$, `6.49×` AR) | `0.8057%` / `0` (`p=1.0`) | `1.6488× [1.6005, 1.6964]` (`290.52`, $\tau=10.54$) | `0` / `0` (`p=1.0`) | `r5_mode2_nosync` (`true`) | `PROMOTED` + `SEALED` |
+| **Round 6（P0+P1 破局轮）** | `SP_OPT_LA_PIPELINE_FUSE=1`（消除 Stage-2 同步 D2H 停顿 + 融合 `bs=1` 元数据与 Triton 胶水，`WITH_LA` 空闲气泡 `-91.7%`：`4.57→0.38 ms`）+ `SP_OPT_ADAPTIVE_LA_CONF=1`（零同步 EWMA 自适应门控）；同步跨 5 模块 Co-Design 独立证伪 `M=48`（`-3.4%`） | **`1.7741× [1.7377, 1.8129]`** (**`342.46`**, $\tau=12.07$, `6.64×` AR) | **`0.7403%` / `0` (`p=1.0`)** | **`1.7036× [1.6531, 1.7541]`** (**`298.95`**, $\tau=10.43$) | **`0` / `0` (`p=1.0`)** | **`r6_la_pipeline_ewma` (`true`)** | **`PROMOTED` + `SEALED`** |
 
 ## 3. Round 4 Token Forcing 拦截与闭环修复记录
 
@@ -47,7 +48,21 @@
 - Dev Controller §6.1 消融（Single-Agent 无 Cost Model）：`job-5e164dc49eee-20261125183458`（`v2_runtime/controller/ablation-single-nocm-v1/verdict.json`）
 - Dev Controller R5（晋升）：`job-1e8c09a76071-20261125205337`（`v2_runtime/controller/r5-blind-mode2-nosync-v1/verdict.json`）
 - Sealed Final R5（通过）：`job-3c4406f256ea-20261125210932`（`v2_runtime/sealed/r5/sealed_verdict.json`）
-- 本地单元测试：`python3 -m unittest discover -s v2/tests -p 'test_*.py' -v`（5/5 通过）。
+- Dev Controller R6（晋升）：`job-63a9fc8dccd3-20261126005507`（`v2_runtime/controller/r6-blind-d3d5-v1/verdict.json`）
+- Sealed Final R6（通过，首次突破 `1.70×`）：`job-32aa107ead6c-20261126011103`（`v2_runtime/sealed/r6/sealed_verdict.json`）
+- 本地单元测试：`python3 -m unittest discover -s v2/tests -p 'test_*.py' -v`（8/8 通过）。
+
+## 7. P0 + P1 通用系统升级与 Round 6 破局实证
+
+为验证提升**自主研究系统本身**（而非人工喂算法点子）的效果，在 `a544f46` 中落地两项 100% 通用的 `v2/` 系统升级（零模型/算法提示）：
+- **P0（双端三因子 Ceiling + Easy/Hard 分层测速）**：`v2/phase0/tau_headroom.py` + `v2/phase0/floors.py` 显式量化 `T_step - T_prof` 系统气泡 + `v2/sandbox/bench_1gpu.py` 按基线 $\tau$ 自动拆出 `easy` / `hard` 双桶防止 Dev 过拟合。
+- **P1（平台期破局与跨模块 Co-Design 协议）**：升级 `v2/agents/master_prompt.md`，在增量收益 `< 3%` 时强制做假设/耦合审计并允许跨模块联合重构。
+
+在严格盲测（0 联网、0 读禁区、0 提示）的 Round 6 中，升级后的系统靠自己打破了 Round 5 平台期：
+- **D3（`SP_OPT_LA_PIPELINE_FUSE=1`）**：精准定位并消除 Stage-2 同步 D2H 停顿，融合 `bs=1` 树元数据与 Triton 胶水，把 `WITH_LA` 空闲气泡压缩 `-91.7%`（`4.57 → 0.38 ms`）。
+- **D5（`SP_OPT_ADAPTIVE_LA_CONF=1`）**：设计零同步 EWMA 自适应门控，在 Easy 和 Hard 两桶上同时击败 R5 `MODE=1` 和 `MODE=2`。
+- **D4（5 模块 Co-Design）**：跨 5 个模块联合解锁 `M=48/64` 无悬崖运行，并独立在硬件上实证 `M=48` 净收益 `-3.4%`（独立重现论文附录 F 的节点经济学结论）。
+- **最终独立验收**：Dev **`1.7741× [1.7377, 1.8129]`**（`342.46 tok/s`，`6.64×` AR，`0.7403%` / `0` events）；**Sealed 未见集首次突破 `1.70×` 达 `1.7036× [1.6531, 1.7541]`**（`298.95 tok/s`，相对 R5 Sealed `+3.32%`，2048 & 4096 均 `0` events）；六代传递记忆 `stock → r1 → ... → r6_la_pipeline_ewma` 重建 `TREE_SHA = 626398107421e2fa91dac54f0f194be1aa815ef4cdee5ac7b74cd0c638243c5b`（`byte_exact_match = true`）。
 
 ## 6. Round 5 物理屋顶收敛与有据停机结论
 

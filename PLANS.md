@@ -18,7 +18,9 @@
 - [x] 将“Priority 0：优先处理上一轮 T1 有损候选，再重测 Ceiling 决定新方向”固化至 `v2/agents/master_prompt.md`，更新文档并同步公开仓库。
 - [x] 完成论文 §6.1 对比消融（无 Cost Model 单 Agent 盲探索 `ablation-single-nocm-v1`）：2×H100 Controller 测得 `1.1173× [1.0809, 1.1590]`（`209.79 tok/s`，`promoted=true`），与 SpecPilot 首轮 `1.2960×`（`+16.0%`，95% CI 无重叠）及 R5 `1.7313×`（`+55.0%`）形成清晰对照。
 - [x] 完成盲测 Round 5 收官（`r5-blind-mode2-nosync-v1`）：Dev Controller `1.7313× [1.7006, 1.7654]`（`334.96 tok/s`，$\tau=12.20$，`0` events，`promoted=true`），Sealed Final `1.6488× [1.6005, 1.6964]`（2048 & 4096 均为 `0` events，`sealed_final_passed=true`），T4 Memory 五代传递重建 `byte_exact_match=true`；4 条无损优化轴已达 H100 Pareto 边界，Master 有据停机封板。
-- [ ] 可选下一步：扩展 Memory Transfer 跨模型或新硬件平台迁移。
+- [x] 落地 P0（`v2/phase0/tau_headroom.py` + `floors.py` 气泡量化 + `bench_1gpu.py` Easy/Hard 分层测速）与 P1（`v2/agents/master_prompt.md` 平台期破局与 Co-Design 协议），8/8 `v2/tests` 通过（`a544f46`）。
+- [x] 完成 P0+P1 升级后的盲测 Round 6（`r6-blind-d3d5-v1`）：Dev Controller **`1.7741× [1.7377, 1.8129]`**（`342.46 tok/s`，`0` events，`promoted=true`），Sealed Final **首次突破 `1.70×` 达 `1.7036× [1.6531, 1.7541]`**（`298.95 tok/s`，2048 & 4096 均 `0` events，`sealed_final_passed=true`），T4 Memory 六代传递重建 `byte_exact_match=true`。
+- [ ] 可选下一步：补齐 P2（通用 Kernel Specialist + `ncu` 深度打磨循环）与 P3（条件负向 Memory 错题本）。
 
 详见 `docs/experiments/specpilot-v2-blind-r1-r4-20261125.md`。
 
