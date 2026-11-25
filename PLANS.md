@@ -16,7 +16,8 @@
 - [x] R4 初版被 T1 Token Forcing 捕获 15 个大 margin 事件并严格拦截；盲测修复深树 TF32 Neumann 级数灾难性相消与 `M_q=16` CUDA Graph 绑定后，Dev Controller `1.7068× [1.6574, 1.7580]`（`326.97 tok/s`，`0` events，`promoted=true`）。
 - [x] 完成 Phase 4 T3 Sealed Final（未见集 `1.6700× [1.6273, 1.7148]`，`292.05 tok/s`，2048 & 4096 Forcing 均为 `0` events，`sealed_final_passed=true`）与 T4 Structured Memory 四代传递重建 `byte_exact_match=true`。
 - [x] 将“Priority 0：优先处理上一轮 T1 有损候选，再重测 Ceiling 决定新方向”固化至 `v2/agents/master_prompt.md`，更新文档并同步公开仓库。
-- [ ] 可选下一步：补跑论文 §6.1 对比消融（Single-Agent 无 Cost Model / Memory Transfer），或基于 R4 基线重测三因子 Ceiling 开启盲测 Round 5。
+- [x] 完成论文 §6.1 对比消融（无 Cost Model 单 Agent 盲探索 `ablation-single-nocm-v1`）：2×H100 Controller 测得 `1.1173× [1.0809, 1.1590]`（`209.79 tok/s`，`promoted=true`），与 SpecPilot 首轮 `1.2960×`（`+16.0%`，95% CI 无重叠）及 R4 `1.7068×`（`+52.8%`）形成清晰对照。
+- [ ] 可选下一步：基于 R4 基线重测三因子 Ceiling 开启盲测 Round 5，或补充 Memory Transfer 跨模型测试。
 
 详见 `docs/experiments/specpilot-v2-blind-r1-r4-20261125.md`。
 

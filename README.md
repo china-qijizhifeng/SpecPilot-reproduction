@@ -8,8 +8,9 @@
   - **Token Forcing 实证拦截与闭环修复**：R4 初版（`331.87 tok/s`）因深树 TF32 Neumann 级数倍增灾难性相消触发 `15` 个大 margin 事件被 Controller 严格拒绝；盲测调试代理定位根因并改为精确 FP32 subwarp 反向三角求解后清零事件并晋升，且已将“优先处理上一轮 T1 有损候选”固化为 [v2/agents/master_prompt.md](v2/agents/master_prompt.md) 的 Priority 0 规则。
   - **Phase 4 T3 Sealed Final（30 条严格未见请求）**：**`1.6700×` `[1.6273, 1.7148]`**（**`292.05 tok/s`** vs Stock `174.84 tok/s`，$\tau: 4.26 \to 8.70$）；未见集 2048-cap（`0.9042%` / `0` events）与 4096-cap 长序列（`0.9175%` / `0` events）双重 FP32 Token Forcing 全部通过（`sealed_final_passed = true`）。
   - **T4 Structured Memory**：`r1_tree_gdn_b12 → r2_w12_gdnv2_fp8draft → r3_tree_wy_attn → r4_w6v2_adaptive_fixed` 四代传递重建 `TREE_SHA` **逐字节完全一致**（`byte_exact_match = true`）；5/5 `v2/tests` 单元测试通过。
-- **正在做**：无活动 GPU 阻塞任务；核心自主闭环已封板提交。
-- **接下来（可选）**：按需补跑论文 §6.1 对比消融（Single-Agent 无 Cost Model / Memory Transfer），或基于 R4 基线重测三因子 Ceiling 启动盲测 Round 5。
+  - **论文 §6.1 对照消融（无 Cost Model 单 Agent）**：同一干净 `stock` 起点、严格盲测 3 轮串行探索，最强方案（`block_size=16 + FlashInfer GDN`）经同一 2×H100 Controller 测得 **`1.1173×` `[1.0809, 1.1590]`**（`209.79 tok/s`，$\tau=5.30$，`promoted = true`）；SpecPilot 完整架构仅首轮即 **`1.2960×`**（`+16.0%`，95% CI 无重叠），4 轮达 **`1.7068×`**（`+52.8%`）。
+- **正在做**：无活动 GPU 阻塞任务；核心自主闭环与 §6.1 消融均已封板提交。
+- **接下来（可选）**：基于 R4 基线重测三因子 Ceiling 启动盲测 Round 5，或扩展 Memory Transfer 跨模型测试。
 
 完整实验记录、演进总表与 NorthJob UUID 见 [SpecPilot v2 全盲测闭环记录](docs/experiments/specpilot-v2-blind-r1-r4-20261125.md)。
 

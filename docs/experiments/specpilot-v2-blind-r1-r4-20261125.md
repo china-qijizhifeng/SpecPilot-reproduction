@@ -43,6 +43,25 @@
 - Dev Controller R4（初版被拒）：`job-dd5567e768ef-20261125143820`（`v2_runtime/controller/r4-blind-d6-w6v2-adaptive/verdict.json`）
 - Dev Controller R4（修复晋升）：`job-9f2490ce5d07-20261125162408`（`v2_runtime/controller/r4-blind-d6-fix-v1/verdict.json`）
 - Sealed Final R4（修复通过）：`sp-v2-sealed-r4-fix-20261125-a01`（`v2_runtime/sealed/r4_fix/sealed_verdict.json`）
+- Dev Controller §6.1 消融（Single-Agent 无 Cost Model）：`job-5e164dc49eee-20261125183458`（`v2_runtime/controller/ablation-single-nocm-v1/verdict.json`）
 - 本地单元测试：`python3 -m unittest discover -s v2/tests -p 'test_*.py' -v`（5/5 通过）。
+
+## 5. 论文 §6.1 对照消融：无 Cost Model 单 Agent vs SpecPilot 完整架构
+
+为检验 **Phase 0 硬件精确三因子 Ceiling** 与 **Master + 多路并行 Direction** 架构的因果贡献，在同一干净 `stock` 引擎起点、同一严格盲测约束（审计 0 联网、0 读禁区与 `v2/phase0`）下，运行单 Agent 串行消融 `Ablation-Single-NoCM`（GPU slot 0，3 次串行尝试）：
+
+- **Attempt 1**：`SP_OPT_DFLASH_BLOCK_SIZE=16` → Tier-3 `1.0387×`（`202.11 tok/s`，10/10 exact match）
+- **Attempt 2**：`+ SP_OPT_GDN_REPLAYSSM=1` → Tier-3 `0.9549×`（回退）
+- **Attempt 3**：`+ SP_OPT_GDN_VERIFY_FLASHINFER=1` → Tier-3 `1.0576×`（`205.74 tok/s`，FP32 等价 `max_diff_s=7.15e-7`）
+
+将消融基线的最强方案（Attempt 3）送入**同一套 2×H100 独立 Dev Controller（30-req 2048-cap 双卡互换 + FP32 Token Forcing）**，同口径对比如下：
+
+| 系统配置 | 自主发现机制范围 | Dev 30-req 2048-cap 配对加速比 (95% CI) | 吞吐 (`tok/s`) | $\tau$ | T1 Forcing (`rate` / `events`) | Controller 判决 |
+|---|---|---|---:|---:|---|---|
+| **无 Cost Model 单 Agent 消融** | `block_size=16` + 切换 FlashInfer GDN 后端（局部配置/后端切换） | **`1.1173× [1.0809, 1.1590]`** | `209.79` | `5.30` | `0.7045%` / `1` (`p=0.981`) | `PROMOTED` |
+| **SpecPilot 完整架构（仅 Round 1）** | Zero-snapshot CUDA GDN + `b=12` + 28-node Best-first Tree | **`1.2960× [1.2712, 1.3219]`**（较消融 **`+16.0%`**，CI 无重叠） | `248.49` | `6.70` | `0.7463%` / `0` (`p=1.0`) | `PROMOTED` |
+| **SpecPilot 完整架构（Round 1–4）** | + 无损 12-bit W12 + FP8 Drafter + 精确 FP32 subwarp Tree-WY + W6 两级 Lookahead | **`1.7068× [1.6574, 1.7580]`**（较消融 **`+52.8%`**） | **`326.97`** | **`10.05`** | `0.6739%` / `0` (`p=1.0`) | `PROMOTED` + `SEALED` (`1.6700×`) |
+
+结论：单 Agent 在没有 Cost Model 引导时并非无效（真实拿到 `1.1173×` 有效无损提速），但其探索停留在局部配置与现成后端切换；引入 Phase 0 三因子屋顶与 Master/多路并行架构后，系统首轮即突破至树验证与定制 CUDA kernel（`1.2960×`），并在 4 轮内直击权重带宽与深树验证瓶颈达到 `1.7068×`（未见集 `1.6700×`）。
 
 > 注：`v2_runtime/` 中的工作树、原始日志、池收件箱与 tarball 属于本地运行产物，已列入 `.gitignore` 不提交公开仓库；`controller/`、`eval/sealed/`、`ledger/` 未修改。

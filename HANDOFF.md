@@ -8,7 +8,8 @@
 - **R4 T1 拦截与闭环修复**：R4 初版（`job-dd5567e768ef-20261125143820`，`1.7312×`）因 `gdn_verify_fast_tree_wy_cuda_kernel` 在 depth 20–31 下 5 步 TF32 Neumann 倍增灾难性相消触发 15 个大 margin 事件被 Controller 拒收；盲测调试代理改为精确 FP32 subwarp 反向三角求解并修复 `M_q=16` `_capture_metadata` 树缓冲绑定后清零事件通过。该工作流已固化进 `v2/agents/master_prompt.md`（Priority 0：先处理上一轮 T1 有损遗留，再重测 Ceiling 决定新方向）。
 - **Phase 4 T3 Sealed Final**（`sp-v2-sealed-r4-fix-20261125-a01`）：30 条严格未见集 `1.6700× [1.6273, 1.7148]`（`292.05 tok/s`，$\tau=8.70$）；2048-cap（`0.9042%` / `0` events）与 4096-cap（`0.9175%` / `0` events）双重 Token Forcing 通过（`sealed_final_passed=true`）。
 - **T4 Structured Memory**：`r1_tree_gdn_b12 → r2_w12_gdnv2_fp8draft → r3_tree_wy_attn → r4_w6v2_adaptive_fixed` 从干净 `stock` 传递重建 `TREE_SHA = a6b67a779cd996531cd2ac306425efcd57d6a59df2995f26fa1e92201ceaa273`，`byte_exact_match=true`。
-- **接续选项**：(1) 补跑论文 §6.1 消融（Single-Agent 无 Cost Model / Memory Transfer）；或 (2) 基于 R4 基线重测 Phase 0 三因子 Ceiling 并开启盲测 Round 5。详见 `docs/experiments/specpilot-v2-blind-r1-r4-20261125.md`。
+- **§6.1 消融对照（无 Cost Model 单 Agent）**：`job-5e164dc49eee-20261125183458`（`ablation-single-nocm-v1`，0 联网/0 读禁区，3 次串行尝试最优 `block_size=16 + FlashInfer GDN`），2×H100 Controller 测得 `1.1173× [1.0809, 1.1590]`（`209.79 tok/s`，$\tau=5.30$，`0.7045%` / `1` event，`promoted=true`），显著低于 SpecPilot 首轮 `1.2960×`（`+16.0%`）与 R4 `1.7068×`（`+52.8%`）。
+- **接续选项**：(1) 基于 R4 基线重测 Phase 0 三因子 Ceiling 并开启盲测 Round 5；或 (2) 补充 Memory Transfer 跨模型测试。详见 `docs/experiments/specpilot-v2-blind-r1-r4-20261125.md`。
 
 ## H100最新收口：Master重新评估与提案（2026-11-13）
 
