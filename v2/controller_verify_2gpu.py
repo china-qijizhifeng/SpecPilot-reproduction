@@ -45,7 +45,52 @@ def _wilson_high(k: int, n: int, z: float = 1.959964) -> float:
     return min(1.0, (center + rad) / denom)
 
 
-def _start_arm(gpu: int, engine_dir: Path, port: int, nccl_port: int, draft_tokens: int, extra_env: dict[str, str], log_path: Path, extra_args: list[str] | None = None) -> subprocess.Popen:
+def _load_prompts_for_model(per_suite: int, model_path: str | None) -> list[dict]:
+    if not model_path:
+        return _load_dev_prompts(per_suite=per_suite)
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    dev_dir = ROOT / "assets/upstream/dev"
+    suites = ["gsm8k", "math500", "humaneval", "mbpp", "mt-bench"]
+    prompts: list[dict] = []
+    for suite in suites:
+        count = 0
+        with (dev_dir / f"{suite}.jsonl").open() as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                ids = tok.apply_chat_template(
+                    [{"role": "user", "content": item["turns"][0]}],
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    enable_thinking=True,
+                )
+                if not isinstance(ids, list):
+                    ids = ids["input_ids"]
+                prompts.append({"id": item["id"], "suite": suite, "input_ids": [int(x) for x in ids]})
+                count += 1
+                if count >= per_suite:
+                    break
+    return prompts
+
+
+def _start_arm(
+    gpu: int,
+    engine_dir: Path,
+    port: int,
+    nccl_port: int,
+    draft_tokens: int,
+    extra_env: dict[str, str],
+    log_path: Path,
+    extra_args: list[str] | None = None,
+    *,
+    model_path: str | None = None,
+    spec_algo: str = "DFLASH",
+    spec_num_steps: int = 3,
+    spec_eagle_topk: int = 1,
+) -> subprocess.Popen:
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     env["SP_ROOT"] = str(ROOT)
@@ -55,22 +100,48 @@ def _start_arm(gpu: int, engine_dir: Path, port: int, nccl_port: int, draft_toke
     env["DRAFT_TOKENS"] = str(draft_tokens)
     env.update({str(k): str(v) for k, v in extra_env.items()})
     arg_str = " ".join(extra_args or [])
-    cmd = f'bash "{ROOT}/harness/sglang/serve.sh" {arg_str}'.strip()
+    if model_path and spec_algo.upper() != "DFLASH":
+        cmd = (
+            f'source "{ROOT}/harness/sglang/env.sh" && '
+            f'exec "$SP_PY" -m sglang.launch_server '
+            f'--model-path "{model_path}" '
+            f'--speculative-algorithm {spec_algo} '
+            f'--speculative-num-steps {spec_num_steps} '
+            f'--speculative-eagle-topk {spec_eagle_topk} '
+            f'--speculative-num-draft-tokens {draft_tokens} '
+            f'--kv-cache-dtype auto --mamba-ssm-dtype float32 '
+            f'--attention-backend fa3 --mem-fraction-static 0.85 '
+            f'--max-running-requests 4 --cuda-graph-max-bs-decode 4 '
+            f'--chunked-prefill-size 8192 --disable-radix-cache --random-seed 0 '
+            f'--host 127.0.0.1 --port {port} --nccl-port {nccl_port} {arg_str}'
+        ).strip()
+    else:
+        cmd = f'bash "{ROOT}/harness/sglang/serve.sh" {arg_str}'.strip()
     log_fh = log_path.open("wb")
     proc = subprocess.Popen(["bash", "-lc", cmd], env=env, stdout=log_fh, stderr=subprocess.STDOUT, start_new_session=True)
     proc._log_fh = log_fh  # type: ignore[attr-defined]
     return proc
 
 
-def _start_fp32_scorer(gpu: int, port: int, nccl_port: int, log_path: Path) -> subprocess.Popen:
+def _start_fp32_scorer(
+    gpu: int,
+    port: int,
+    nccl_port: int,
+    log_path: Path,
+    *,
+    stock_engine: Path = STOCK_ENGINE,
+    model_path: str | None = None,
+) -> subprocess.Popen:
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     env["SP_ROOT"] = str(ROOT)
-    env["SP_ENGINE"] = str(STOCK_ENGINE)
+    env["SP_ENGINE"] = str(stock_engine)
+    model_arg = f'"{model_path}"' if model_path else '"$SP_TARGET"'
+    dtype_arg = "" if model_path else "--dtype bfloat16 "
     cmd = (
         f'source "{ROOT}/harness/sglang/env.sh" && '
         f'exec "$SP_PY" -m sglang.launch_server '
-        f'--model-path "$SP_TARGET" --dtype bfloat16 --kv-cache-dtype auto '
+        f'--model-path {model_arg} {dtype_arg}--kv-cache-dtype auto '
         f'--mamba-ssm-dtype float32 --attention-backend fa3 --mem-fraction-static 0.85 '
         f'--max-running-requests 4 --chunked-prefill-size 8192 --disable-radix-cache '
         f'--enable-fp32-lm-head --random-seed 0 --host 127.0.0.1 --port {port} --nccl-port {nccl_port}'
@@ -147,6 +218,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cand-id", required=True)
     parser.add_argument("--cand-worktree", type=Path, required=True)
+    parser.add_argument("--stock-worktree", type=Path, default=STOCK_ENGINE)
+    parser.add_argument("--model-path", type=str, default=None)
+    parser.add_argument("--spec-algo", type=str, default="DFLASH")
+    parser.add_argument("--spec-num-steps", type=int, default=3)
+    parser.add_argument("--spec-eagle-topk", type=int, default=1)
+    parser.add_argument("--stock-draft-tokens", type=int, default=8)
     parser.add_argument("--option-env", type=str, default="{}")
     parser.add_argument("--cand-draft-tokens", type=int, default=8)
     parser.add_argument("--out-dir", type=Path, required=True)
@@ -158,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     cand_env = json.loads(args.option_env)
-    prompts = _load_dev_prompts(per_suite=args.per_suite)
+    prompts = _load_prompts_for_model(per_suite=args.per_suite, model_path=args.model_path)
 
     # --- T2: 2 Physical Rounds with GPU Swap (0 <-> 1) ---
     req_log_ratios: dict[str, list[float]] = {p["id"]: [] for p in prompts}
@@ -171,8 +248,18 @@ def main(argv: list[str] | None = None) -> int:
         p_stock, nccl_stock = _free_port(), _free_port()
         p_cand, nccl_cand = _free_port(), _free_port()
         print(f"[controller] Round {rnd}: stock=GPU{stock_gpu} (port {p_stock}), cand=GPU{cand_gpu} (port {p_cand})", flush=True)
-        proc_s = _start_arm(stock_gpu, STOCK_ENGINE, p_stock, nccl_stock, 8, {}, args.out_dir / f"r{rnd}_stock.log")
-        proc_c = _start_arm(cand_gpu, args.cand_worktree, p_cand, nccl_cand, args.cand_draft_tokens, cand_env, args.out_dir / f"r{rnd}_cand.log")
+        proc_s = _start_arm(
+            stock_gpu, args.stock_worktree, p_stock, nccl_stock, args.stock_draft_tokens, {},
+            args.out_dir / f"r{rnd}_stock.log",
+            model_path=args.model_path, spec_algo=args.spec_algo,
+            spec_num_steps=args.spec_num_steps, spec_eagle_topk=args.spec_eagle_topk,
+        )
+        proc_c = _start_arm(
+            cand_gpu, args.cand_worktree, p_cand, nccl_cand, args.cand_draft_tokens, cand_env,
+            args.out_dir / f"r{rnd}_cand.log",
+            model_path=args.model_path, spec_algo=args.spec_algo,
+            spec_num_steps=args.spec_num_steps, spec_eagle_topk=args.spec_eagle_topk,
+        )
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
                 f1 = ex.submit(_wait_health, p_stock, 1200.0)
@@ -218,7 +305,10 @@ def main(argv: list[str] | None = None) -> int:
     # --- T1: FP32 LM-Head Teacher-Forced Token Forcing ---
     print("[controller] Starting FP32 LM-head teacher-forced scorer on GPU 0...", flush=True)
     p_score, nccl_score = _free_port(), _free_port()
-    proc_sc = _start_fp32_scorer(0, p_score, nccl_score, args.out_dir / "fp32_scorer.log")
+    proc_sc = _start_fp32_scorer(
+        0, p_score, nccl_score, args.out_dir / "fp32_scorer.log",
+        stock_engine=args.stock_worktree, model_path=args.model_path,
+    )
     try:
         _wait_health(p_score, 600.0)
         stock_tf = _score_outputs(p_score, prompts, round1_stock_rows, delta=args.delta)

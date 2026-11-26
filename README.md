@@ -48,13 +48,12 @@ GitHub：[china-qijizhifeng/SpecPilot-reproduction](https://github.com/china-qij
 ## 当前状态（已完成 / 正在做 / 接下来）
 
 - **已完成**：
-  - `Qwen3.8-27B BF16 + DFlash2`（H100）全盲测 **Round 1–6** 闭环（Dev **`1.7741×` / `342.46 tok/s`**，Sealed **`1.7036×` / `298.95 tok/s`**，`0` 大 margin 事件，6 代 Memory 逐字节一致）；
-  - 论文 **§6.1 无 Cost Model 单 Agent 消融**（`1.1173×`，与 SpecPilot 首轮 `1.2960×` / R6 `1.7741×` 形成清晰无重叠 CI 对照）；
-  - `v2/` 通用系统升级（P0 双端 Ceiling + Easy/Hard 分层、P1 平台期破局、P3 双层 4D Structured Memory、Sparse MoE + 内置 MTP 支持），**14/14 单元测试全部通过**。
-- **正在做**：
-  - 跨模型/跨架构实战测试：**`Qwen3.5-35B-A3B-FP8`（256 专家 top-8 稀疏 MoE + 原生 MTP `NEXTN`）** Round 1（同时实测 4 维 Structured Memory 跨实验检索与防负迁移）。
-- **接下来**：
-  - 完成 `Qwen3.5-35B-A3B-FP8` 的独立 2×H100 Controller 验收与跨模型记忆沉淀。
+  - **`Qwen3.8-27B BF16 + DFlash2`（H100）全盲测 Round 1–6 闭环**：Dev **`1.7741×` / `342.46 tok/s`**（`6.64×` AR），Sealed **`1.7036×` / `298.95 tok/s`**，`0` 大 margin 事件，6 代 Memory 逐字节一致；
+  - **论文 §6.1 无 Cost Model 单 Agent 消融**：`1.1173×`（`209.79 tok/s`），与 SpecPilot 首轮 `1.2960×` / R6 `1.7741×` 形成清晰无重叠 CI 对照；
+  - **跨模型/跨架构实战验证（`Qwen3.5-35B-A3B-FP8` 256 专家稀疏 MoE + 原生 MTP `NEXTN`）Round 1**：挂载 4D Structured Memory（成功拦住 27B 宽树负迁移 `0.893×`，精准迁移 FP8 Drafter `lm_head` / CUDA Graph / 零同步 EWMA 门控，并独立新发现 SM90 W8A16 FP8 MoE + Shared-MLP 融合算子）；经独立 2×H100 Controller 验收达 **`1.2771× [1.2591, 1.2958]`**（**`636.46 tok/s`** vs Stock MTP `507.92 tok/s`，`2.28×` AR，$\tau: 3.41 \to 4.34$；FP32 Token Forcing 不匹配率 `1.2145%` < Stock `1.2763%`，大 margin 事件 **`8` 少于 Stock 的 `12`**，`event_p = 0.9998`，**`promoted = true`**），并完成 `qwen35_35b_a3b_r1_moe_mtp` 逐字节 Memory 蒸馏；
+  - **`v2/` 通用系统升级**：P0 双端 Ceiling（支持 Dense / Hybrid / Sparse MoE）+ Easy/Hard 分层、P1 平台期破局、P3 双层 4D Structured Memory、通用 `controller_verify_2gpu.py`，**14/14 单元测试全部通过**。
+- **正在做**：两大不同架构模型（Dense BF16 + DFlash2、Sparse MoE FP8 + 原生 MTP）均已通过独立 2×H100 Controller 晋升并完成 4D Memory 沉淀。
+- **接下来（可选）**：继续推进 `Qwen3.5-35B-A3B-FP8` Round 2 或扩展大 Batch（`bs=8/16`）场景验证。
 
 ---
 
