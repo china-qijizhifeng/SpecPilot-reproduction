@@ -416,5 +416,212 @@ class TestWorktreeAndNorthJob(unittest.TestCase):
         self.assertEqual(out["spec"]["maxRetry"], 0)
 
 
+class TestTempGtZeroTargetOnly(unittest.TestCase):
+    def test_tau_headroom_expected_acceptance_and_dedup(self):
+        from v2.phase0.tau_headroom import (
+            analyze_tau_headroom,
+            best_first_tree_acceptance,
+            best_first_tree_expected_acceptance,
+        )
+
+        # Depth 0: two children with target probs 0.4, 0.3; Depth 1: two children with 0.5, 0.2
+        pos_draft = [[0.6, 0.4], [0.7, 0.3]]
+        pos_target = [[0.4, 0.3], [0.5, 0.2]]
+        # Budget 3 = root + 2 depth-0 children (draft probs 0.6, 0.4; next best depth-1 is 0.6*0.7=0.42 > 0.4!)
+        # Wait: 0.6 > 0.42 > 0.4, so budget 3 selects: root, d0_r0 (0.4), d1_r0 under d0_r0 (0.4*0.5=0.2)
+        e3 = best_first_tree_expected_acceptance(pos_draft, pos_target, budget=3)
+        self.assertAlmostEqual(e3, 1.0 + 0.4 + 0.2, places=6)
+
+        # Duplicate sibling dedup: second child has same token_id=99 -> must contribute 0!
+        e_dedup = best_first_tree_expected_acceptance(
+            [[0.6, 0.4]], [[0.4, 0.4]], budget=3, pos_token_ids=[[99, 99]]
+        )
+        self.assertAlmostEqual(e_dedup, 1.0 + 0.4, places=6)
+
+        # Reduces identically to greedy when target probs are 0/1
+        greedy_exact = best_first_tree_acceptance(pos_draft, [0, 1], budget=5)
+        stoch_as_greedy = best_first_tree_expected_acceptance(pos_draft, [[1.0, 0.0], [0.0, 1.0]], budget=5)
+        self.assertAlmostEqual(stoch_as_greedy, float(greedy_exact), places=6)
+
+        # analyze_tau_headroom with temperature > 0
+        steps = [{"accepted_tokens": 2, "pos_top_probs": pos_draft, "pos_target_probs": pos_target}]
+        res = analyze_tau_headroom(steps, budgets=(3, 8), temperature=0.7)
+        self.assertEqual(res["sampling_mode"], "stochastic_target_only")
+        self.assertAlmostEqual(res["tau_best_by_budget"]["3"], 1.6, places=4)
+        self.assertGreaterEqual(res["tau_best_by_budget"]["8"], res["tau_best_by_budget"]["3"])
+
+    def test_t1s_positive_and_fault_injections(self):
+        import math
+        import random
+        from v2.t1s_verify import (
+            aggregate_t1s_metrics,
+            compute_step_metrics,
+            evaluate_t1s_verdict,
+            load_stock_cache,
+            normalize_top_logprobs,
+            save_stock_cache,
+            stock_cache_key,
+        )
+
+        rng = random.Random(123)
+        temp = 0.7
+        # Raw logprobs for 6 tokens at T=1.0
+        base_raw = [(-0.8, 10), (-1.3, 11), (-1.9, 12), (-2.4, 13), (-3.0, 14), (-3.8, 15)]
+        p_true = normalize_top_logprobs(base_raw, temperature=temp)
+        tids = list(p_true.keys())
+        probs = [p_true[t] for t in tids]
+
+        def _sample(ps):
+            u = rng.random()
+            c = 0.0
+            for tid, p in zip(tids, ps):
+                c += p
+                if u <= c:
+                    return tid
+            return tids[-1]
+
+        N = 1500
+        # 1. Stock baseline (tiny BF16 jitter ~0.002 logit noise)
+        stock_steps = []
+        for _ in range(N):
+            y = _sample(probs)
+            noisy = [(lp + rng.gauss(0.0, 0.003), tid) for lp, tid in base_raw]
+            stock_steps.append(compute_step_metrics(
+                ref_top_entries=base_raw, cand_top_entries=noisy, emitted_token=y, temperature=temp, rng=rng
+            ))
+        stock_m = aggregate_t1s_metrics(stock_steps)
+
+        # 2. Lossless Candidate (same tiny BF16 jitter, genuinely sampled from p_true)
+        cand_ok_steps = []
+        for _ in range(N):
+            y = _sample(probs)
+            noisy = [(lp + rng.gauss(0.0, 0.003), tid) for lp, tid in base_raw]
+            cand_ok_steps.append(compute_step_metrics(
+                ref_top_entries=base_raw, cand_top_entries=noisy, emitted_token=y, temperature=temp, rng=rng
+            ))
+        cand_ok_m = aggregate_t1s_metrics(cand_ok_steps)
+        v_ok = evaluate_t1s_verdict(stock_m, cand_ok_m, {"actually_stochastic": True})
+        self.assertTrue(v_ok["t1s_pass"], f"Expected lossless candidate PASS, got {v_ok}")
+
+        # 3. Fault Injection 1: Silent greedy collapse (always emits top-1 token 10)
+        greedy_steps = [
+            compute_step_metrics(ref_top_entries=base_raw, cand_top_entries=base_raw, emitted_token=10, temperature=temp, rng=rng)
+            for _ in range(N)
+        ]
+        greedy_m = aggregate_t1s_metrics(greedy_steps)
+        v_greedy = evaluate_t1s_verdict(stock_m, greedy_m, {"actually_stochastic": False})
+        self.assertFalse(v_greedy["t1s_pass"])
+        self.assertFalse(v_greedy["m5_routing_pass"])
+        self.assertLess(greedy_m["z_nll"], -10.0)
+
+        # 4. Fault Injection 2: Temperature shift (actually sampled at T=0.45 pretending to be T=0.7)
+        p_cold = normalize_top_logprobs(base_raw, temperature=0.45)
+        cold_probs = [p_cold[t] for t in tids]
+        cold_steps = [
+            compute_step_metrics(ref_top_entries=base_raw, cand_top_entries=base_raw, emitted_token=_sample(cold_probs), temperature=temp, rng=rng)
+            for _ in range(N)
+        ]
+        cold_m = aggregate_t1s_metrics(cold_steps)
+        v_cold = evaluate_t1s_verdict(stock_m, cold_m, {"actually_stochastic": True})
+        self.assertFalse(v_cold["t1s_pass"])
+        self.assertFalse(v_cold["m5_routing_pass"])
+
+        # 5. Fault Injection 3: Corrupted Target Verify logits (operator/state noise sigma=0.3)
+        corrupt_steps = []
+        for _ in range(N):
+            y = _sample(probs)
+            bad = [(lp + rng.gauss(0.0, 0.30), tid) for lp, tid in base_raw]
+            corrupt_steps.append(compute_step_metrics(
+                ref_top_entries=base_raw, cand_top_entries=bad, emitted_token=y, temperature=temp, rng=rng
+            ))
+        corrupt_m = aggregate_t1s_metrics(corrupt_steps)
+        v_corrupt = evaluate_t1s_verdict(stock_m, corrupt_m, {"actually_stochastic": True})
+        self.assertFalse(v_corrupt["t1s_pass"])
+        self.assertFalse(v_corrupt["m1_events_pass"])
+        self.assertFalse(v_corrupt["m2_mean_tvd_pass"])
+
+        # 6. Stock cache round-trip
+        with tempfile.TemporaryDirectory() as td:
+            cdir = Path(td)
+            k = stock_cache_key(
+                model_path="Qwen3.8-27B", stock_worktree="/stock", prompt_ids=["a", "b"],
+                temperature=0.7, top_p=1.0, top_k=-1, max_new_tokens=512,
+            )
+            self.assertIsNone(load_stock_cache(cdir, k))
+            save_stock_cache(cdir, k, {"metrics": stock_m})
+            loaded = load_stock_cache(cdir, k)
+            self.assertEqual(loaded["metrics"]["mean_tvd"], stock_m["mean_tvd"])
+
+    def test_cross_temperature_sampling_transfer_ranking(self):
+        from v2.memory.store import assess_sampling_transfer, assess_transfer
+
+        q_t07 = {"workload": {"batch_size": 1, "temperature": 0.7, "decoding": "stochastic_target_only"}}
+        q_t0 = {"workload": {"batch_size": 1, "temperature": 0.0, "decoding": "greedy_temp0"}}
+
+        self.assertEqual(assess_sampling_transfer("temp_agnostic", q_t07)["transfer_status"], "direct")
+        self.assertEqual(assess_sampling_transfer("adapt_sampler_target_only", q_t07)["transfer_status"], "adapt_required")
+        self.assertEqual(assess_sampling_transfer("greedy_only", q_t07)["transfer_status"], "incompatible")
+        self.assertEqual(assess_sampling_transfer("greedy_only", q_t0)["transfer_status"], "direct")
+        self.assertEqual(assess_sampling_transfer("adapt_sampler_target_only", q_t0)["transfer_status"], "direct")
+
+        # 5-axis generalization: model / spec / GPU / batch / temp
+        entry_tree = {
+            "kind": "positive",
+            "context": {
+                "model": {"target": "Qwen3.8-27B", "arch_family": "hybrid_gdn_dense", "dtype": "bf16"},
+                "spec": {"algo": "DFlash2"},
+                "hardware": {"gpu": "H100-SXM5-80GB", "sm": "sm_90"},
+                "workload": {"batch_size": 1, "temperature": 0.0},
+            },
+            "transfer_scope": {
+                "code_replay_requires": ["model.target", "spec.algo", "hardware.sm"],
+                "pattern_requires": {"model.arch_family": ["hybrid_gdn_dense", "dense"]},
+                "pattern_excludes": {"model.arch_family": ["sparse_moe"]},
+                "sampling_compatibility": "adapt_sampler_target_only",
+                "batch_regime": "small_bs",
+            },
+        }
+        # Same model/spec/GPU at temp=0.7 -> code_adapt (reuse fast tree kernel + swap Target-Only sampler!)
+        self.assertEqual(
+            assess_transfer(entry_tree, {
+                "model": {"target": "Qwen3.8-27B", "arch_family": "hybrid_gdn_dense", "dtype": "bf16"},
+                "spec": {"algo": "DFlash2"},
+                "hardware": {"sm": "sm_90"},
+                "workload": {"batch_size": 1, "temperature": 0.7},
+            })["verdict"],
+            "code_adapt",
+        )
+        # Different GPU (B200 sm_100) + different Dense model -> pattern_transfer (concept only, not raw patch)
+        self.assertEqual(
+            assess_transfer(entry_tree, {
+                "model": {"target": "Llama-4-Dense", "arch_family": "dense", "dtype": "bf16"},
+                "spec": {"algo": "EAGLE3"},
+                "hardware": {"sm": "sm_100"},
+                "workload": {"batch_size": 1, "temperature": 0.7},
+            })["verdict"],
+            "pattern_transfer",
+        )
+        # Sparse MoE -> blocked (prevents wide-tree negative transfer!)
+        self.assertEqual(
+            assess_transfer(entry_tree, {
+                "model": {"target": "Qwen3.5-35B-A3B-FP8", "arch_family": "sparse_moe", "dtype": "fp8"},
+                "spec": {"algo": "MTP"},
+                "hardware": {"sm": "sm_90"},
+                "workload": {"batch_size": 1, "temperature": 0.7},
+            })["verdict"],
+            "blocked",
+        )
+        # Large batch (bs=32) -> blocked (small_bs regime guard!)
+        self.assertEqual(
+            assess_transfer(entry_tree, {
+                "model": {"target": "Qwen3.8-27B", "arch_family": "hybrid_gdn_dense", "dtype": "bf16"},
+                "spec": {"algo": "DFlash2"},
+                "hardware": {"sm": "sm_90"},
+                "workload": {"batch_size": 32, "temperature": 0.0},
+            })["verdict"],
+            "blocked",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

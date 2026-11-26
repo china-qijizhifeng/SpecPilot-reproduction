@@ -26,7 +26,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from v2.phase0.measure_stock import _free_port, _http_post_json, _load_dev_prompts, _stop_server, _wait_health
+from v2.phase0.measure_stock import (
+    _free_port,
+    _http_post_json,
+    _load_dev_prompts,
+    _make_sampling_params,
+    _stop_server,
+    _wait_health,
+)
 
 
 def _launch(engine_dir: Path, port: int, nccl_port: int, draft_tokens: int, extra_env: dict[str, str], log_path: Path) -> subprocess.Popen:
@@ -49,7 +56,18 @@ def _launch(engine_dir: Path, port: int, nccl_port: int, draft_tokens: int, extr
     return proc
 
 
-def _run_arm(engine_dir: Path, prompts: list[dict], draft_tokens: int, extra_env: dict[str, str], max_new_tokens: int, log_path: Path) -> dict:
+def _run_arm(
+    engine_dir: Path,
+    prompts: list[dict],
+    draft_tokens: int,
+    extra_env: dict[str, str],
+    max_new_tokens: int,
+    log_path: Path,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    top_k: int = -1,
+    check_stochasticity: bool = False,
+) -> dict:
     port = _free_port()
     nccl_port = _free_port()
     proc = _launch(engine_dir, port, nccl_port, draft_tokens, extra_env, log_path)
@@ -57,7 +75,25 @@ def _run_arm(engine_dir: Path, prompts: list[dict], draft_tokens: int, extra_env
         _wait_health(port, timeout_s=600.0)
         url = f"http://127.0.0.1:{port}/generate"
         for p in prompts[:2]:
-            _http_post_json(url, {"input_ids": p["input_ids"], "sampling_params": {"temperature": 0.0, "top_k": 1, "max_new_tokens": 32}})
+            _http_post_json(
+                url,
+                {
+                    "input_ids": p["input_ids"],
+                    "sampling_params": _make_sampling_params(32, temperature=temperature, top_p=top_p, top_k=top_k),
+                },
+            )
+
+        stochasticity_check = None
+        if check_stochasticity and float(temperature) > 0.0 and prompts:
+            r_g = _http_post_json(url, {"input_ids": prompts[0]["input_ids"], "sampling_params": _make_sampling_params(64, temperature=0.0)})
+            r_s1 = _http_post_json(url, {"input_ids": prompts[0]["input_ids"], "sampling_params": _make_sampling_params(64, temperature=temperature, top_p=top_p, top_k=top_k)})
+            r_s2 = _http_post_json(url, {"input_ids": prompts[0]["input_ids"], "sampling_params": _make_sampling_params(64, temperature=temperature, top_p=top_p, top_k=top_k)})
+            g_ids, s1_ids, s2_ids = r_g.get("output_ids", []), r_s1.get("output_ids", []), r_s2.get("output_ids", [])
+            stochasticity_check = {
+                "s1_differs_from_greedy": s1_ids != g_ids,
+                "s2_differs_from_s1": s2_ids != s1_ids,
+                "actually_stochastic": (s1_ids != g_ids) and (s2_ids != s1_ids),
+            }
 
         rows = []
         tot_tok = 0
@@ -67,7 +103,10 @@ def _run_arm(engine_dir: Path, prompts: list[dict], draft_tokens: int, extra_env
             t0 = time.perf_counter()
             resp = _http_post_json(
                 url,
-                {"input_ids": p["input_ids"], "sampling_params": {"temperature": 0.0, "top_k": 1, "max_new_tokens": max_new_tokens}},
+                {
+                    "input_ids": p["input_ids"],
+                    "sampling_params": _make_sampling_params(max_new_tokens, temperature=temperature, top_p=top_p, top_k=top_k),
+                },
             )
             dt = time.perf_counter() - t0
             meta = resp.get("meta_info", {})
@@ -98,6 +137,7 @@ def _run_arm(engine_dir: Path, prompts: list[dict], draft_tokens: int, extra_env
             "total_tokens": tot_tok,
             "total_steps": tot_steps,
             "total_s": round(tot_s, 4),
+            "stochasticity_check": stochasticity_check,
         }
     finally:
         _stop_server(proc)
@@ -153,6 +193,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cand-draft-tokens", type=int, default=8)
     parser.add_argument("--per-suite", type=int, default=2)
     parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=-1)
     args = parser.parse_args(argv)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -160,12 +203,21 @@ def main(argv: list[str] | None = None) -> int:
     base_env = json.loads(args.base_option_env)
     cand_env = json.loads(args.option_env)
 
-    print(f"[bench_1gpu] running BASELINE ({base_env})...", flush=True)
-    base = _run_arm(args.worktree, prompts, args.base_draft_tokens, base_env, args.max_new_tokens, args.out_dir / "base_server.log")
+    print(f"[bench_1gpu] running BASELINE ({base_env}, temp={args.temperature})...", flush=True)
+    base = _run_arm(
+        args.worktree, prompts, args.base_draft_tokens, base_env, args.max_new_tokens,
+        args.out_dir / "base_server.log",
+        temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
+    )
     print(f"[bench_1gpu] BASELINE: {base['avg_tok_per_s']} tok/s, tau={base['avg_tau']}, step={base['avg_step_ms']} ms", flush=True)
 
-    print(f"[bench_1gpu] running CANDIDATE (option ON: {cand_env}, draft={args.cand_draft_tokens})...", flush=True)
-    cand = _run_arm(args.worktree, prompts, args.cand_draft_tokens, cand_env, args.max_new_tokens, args.out_dir / "cand_server.log")
+    print(f"[bench_1gpu] running CANDIDATE (option ON: {cand_env}, draft={args.cand_draft_tokens}, temp={args.temperature})...", flush=True)
+    cand = _run_arm(
+        args.worktree, prompts, args.cand_draft_tokens, cand_env, args.max_new_tokens,
+        args.out_dir / "cand_server.log",
+        temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
+        check_stochasticity=(args.temperature > 0.0),
+    )
     print(f"[bench_1gpu] CANDIDATE: {cand['avg_tok_per_s']} tok/s, tau={cand['avg_tau']}, step={cand['avg_step_ms']} ms", flush=True)
 
     exact_matches = 0

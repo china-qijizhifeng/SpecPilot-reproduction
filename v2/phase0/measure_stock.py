@@ -125,11 +125,40 @@ def _stop_server(proc: subprocess.Popen) -> None:
         fh.close()
 
 
-def _benchmark_server(port: int, prompts: list[dict], max_new_tokens: int = 512) -> dict:
+def _make_sampling_params(
+    max_new_tokens: int,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    top_k: int = -1,
+) -> dict:
+    if float(temperature) <= 0.0:
+        return {"temperature": 0.0, "top_k": 1, "max_new_tokens": int(max_new_tokens)}
+    return {
+        "temperature": float(temperature),
+        "top_p": float(top_p),
+        "top_k": int(top_k),
+        "max_new_tokens": int(max_new_tokens),
+    }
+
+
+def _benchmark_server(
+    port: int,
+    prompts: list[dict],
+    max_new_tokens: int = 512,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    top_k: int = -1,
+) -> dict:
     url = f"http://127.0.0.1:{port}/generate"
     # Warmup (2 short requests)
     for p in prompts[:2]:
-        _http_post_json(url, {"input_ids": p["input_ids"], "sampling_params": {"temperature": 0.0, "top_k": 1, "max_new_tokens": 32}})
+        _http_post_json(
+            url,
+            {
+                "input_ids": p["input_ids"],
+                "sampling_params": _make_sampling_params(32, temperature=temperature, top_p=top_p, top_k=top_k),
+            },
+        )
 
     rows = []
     total_tokens = 0
@@ -141,7 +170,7 @@ def _benchmark_server(port: int, prompts: list[dict], max_new_tokens: int = 512)
             url,
             {
                 "input_ids": p["input_ids"],
-                "sampling_params": {"temperature": 0.0, "top_k": 1, "max_new_tokens": max_new_tokens},
+                "sampling_params": _make_sampling_params(max_new_tokens, temperature=temperature, top_p=top_p, top_k=top_k),
             },
         )
         dt = time.perf_counter() - t0
@@ -314,6 +343,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--per-suite", type=int, default=2)
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--draft-tokens", type=int, default=8)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--tau-best-replay", type=float, default=6.42, help="Best-first tree / oracle tau from exact replay")
     parser.add_argument("--skip-ar", action="store_true")
     args = parser.parse_args(argv)
@@ -329,11 +361,18 @@ def main(argv: list[str] | None = None) -> int:
     # 2. Measure stock/candidate server
     port = _free_port()
     nccl_port = _free_port()
-    print(f"[phase0] starting speculative server on port {port}...", flush=True)
+    print(f"[phase0] starting speculative server on port {port} (temp={args.temperature})...", flush=True)
     proc = _start_server(args.engine_dir, port, nccl_port, "spec", args.draft_tokens, args.out_dir / "spec_server.log")
     try:
         _wait_health(port)
-        spec_bench = _benchmark_server(port, prompts, max_new_tokens=args.max_new_tokens)
+        spec_bench = _benchmark_server(
+            port,
+            prompts,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+        )
     finally:
         _stop_server(proc)
     (args.out_dir / "spec_bench.json").write_text(json.dumps(spec_bench, indent=2) + "\n")
@@ -347,7 +386,14 @@ def main(argv: list[str] | None = None) -> int:
         proc = _start_server(args.engine_dir, port, nccl_port, "ar", args.draft_tokens, args.out_dir / "ar_server.log")
         try:
             _wait_health(port)
-            ar_bench = _benchmark_server(port, prompts[:5], max_new_tokens=min(args.max_new_tokens, 256))
+            ar_bench = _benchmark_server(
+                port,
+                prompts[:5],
+                max_new_tokens=min(args.max_new_tokens, 256),
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+            )
             t_ar_ms = ar_bench["avg_step_ms"]
             (args.out_dir / "ar_bench.json").write_text(json.dumps(ar_bench, indent=2) + "\n")
         finally:

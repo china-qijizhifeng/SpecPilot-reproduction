@@ -30,7 +30,22 @@ sys.path.insert(0, str(ROOT))
 from controller.scoring import decode_scores
 from controller.stats import binom_one_sided, stratified_geomean_ci
 from controller.token_force import _wilson_low
-from v2.phase0.measure_stock import _free_port, _http_post_json, _load_dev_prompts, _stop_server, _wait_health
+from v2.phase0.measure_stock import (
+    _free_port,
+    _http_post_json,
+    _load_dev_prompts,
+    _make_sampling_params,
+    _stop_server,
+    _wait_health,
+)
+from v2.t1s_verify import (
+    aggregate_t1s_metrics,
+    compute_step_metrics,
+    evaluate_t1s_verdict,
+    load_stock_cache,
+    save_stock_cache,
+    stock_cache_key,
+)
 
 STOCK_ENGINE = Path("/gpfs/users/jixinpeng/specpilot_data/work/engines/h100_c1_qwen38-27b_dflash2-stock")
 
@@ -152,21 +167,35 @@ def _start_fp32_scorer(
     return proc
 
 
-def _gen_one(port: int, prompt: dict, max_new_tokens: int) -> dict:
+def _gen_one(
+    port: int,
+    prompt: dict,
+    max_new_tokens: int,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    top_k: int = -1,
+    return_logprob: bool = False,
+    top_logprobs_num: int = 20,
+) -> dict:
     url = f"http://127.0.0.1:{port}/generate"
+    payload: dict = {
+        "input_ids": prompt["input_ids"],
+        "sampling_params": _make_sampling_params(
+            max_new_tokens, temperature=temperature, top_p=top_p, top_k=top_k
+        ),
+    }
+    if return_logprob:
+        payload["return_logprob"] = True
+        payload["top_logprobs_num"] = int(top_logprobs_num)
     t0 = time.perf_counter()
-    resp = _http_post_json(
-        url,
-        {"input_ids": prompt["input_ids"], "sampling_params": {"temperature": 0.0, "top_k": 1, "max_new_tokens": max_new_tokens}},
-        timeout_s=600.0,
-    )
+    resp = _http_post_json(url, payload, timeout_s=600.0)
     dt = time.perf_counter() - t0
     meta = resp.get("meta_info", {})
     out_ids = list(resp.get("output_ids", []))
     comp = int(meta.get("completion_tokens", len(out_ids)))
     vct = int(meta.get("spec_verify_ct", 0))
     lat = float(meta.get("e2e_latency", dt))
-    return {
+    row = {
         "id": prompt["id"],
         "suite": prompt["suite"],
         "completion_tokens": comp,
@@ -175,6 +204,89 @@ def _gen_one(port: int, prompt: dict, max_new_tokens: int) -> dict:
         "tok_per_s": comp / max(lat, 1e-6),
         "output_ids": out_ids,
     }
+    if return_logprob:
+        row["output_top_logprobs"] = meta.get("output_top_logprobs")
+        row["output_token_logprobs"] = meta.get("output_token_logprobs")
+    return row
+
+
+def _check_stochasticity(
+    port: int,
+    prompt: dict,
+    temperature: float,
+    top_p: float = 1.0,
+    top_k: int = -1,
+) -> dict:
+    rg = _gen_one(port, prompt, 64, temperature=0.0)
+    rs1 = _gen_one(port, prompt, 64, temperature=temperature, top_p=top_p, top_k=top_k)
+    rs2 = _gen_one(port, prompt, 64, temperature=temperature, top_p=top_p, top_k=top_k)
+    g, s1, s2 = rg["output_ids"], rs1["output_ids"], rs2["output_ids"]
+    return {
+        "s1_differs_from_greedy": s1 != g,
+        "s2_differs_from_s1": s2 != s1,
+        "actually_stochastic": (s1 != g) and (s2 != s1),
+    }
+
+
+def _score_outputs_t1s(
+    port: int,
+    prompts: list[dict],
+    outputs: list[dict],
+    temperature: float,
+    top_p: float = 1.0,
+    top_k: int = -1,
+    top_logprobs_num: int = 20,
+) -> dict:
+    import random
+
+    url = f"http://127.0.0.1:{port}/generate"
+    rng = random.Random(0)
+    step_metrics: list[dict] = []
+    for prompt, row in zip(prompts, outputs):
+        out_ids = row["output_ids"]
+        if not out_ids:
+            continue
+        in_ids = prompt["input_ids"]
+        resp = _http_post_json(
+            url,
+            {
+                "input_ids": in_ids + out_ids,
+                "return_logprob": True,
+                "logprob_start_len": 0,
+                "top_logprobs_num": int(top_logprobs_num),
+                "sampling_params": {"temperature": 0.0, "top_k": 1, "max_new_tokens": 1},
+            },
+            timeout_s=600.0,
+        )
+        meta = resp.get("meta_info", {})
+        in_top = meta.get("input_top_logprobs") or []
+        in_tok = meta.get("input_token_logprobs") or []
+        cand_top = row.get("output_top_logprobs") or []
+        cand_tok = row.get("output_token_logprobs") or []
+        n_in = len(in_ids)
+        for i, tok_id in enumerate(out_ids):
+            pos = n_in + i
+            if pos >= len(in_top) or not in_top[pos]:
+                continue
+            ref_top_i = in_top[pos]
+            ref_lp_i = float(in_tok[pos][0]) if (pos < len(in_tok) and in_tok[pos] and in_tok[pos][0] is not None) else None
+            cand_top_i = cand_top[i] if (i < len(cand_top) and cand_top[i]) else None
+            cand_lp_i = float(cand_tok[i][0]) if (i < len(cand_tok) and cand_tok[i] and cand_tok[i][0] is not None) else None
+            m = compute_step_metrics(
+                ref_top_entries=ref_top_i,
+                cand_top_entries=cand_top_i,
+                emitted_token=int(tok_id),
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                ref_tok_raw_lp=ref_lp_i,
+                cand_tok_raw_lp=cand_lp_i,
+                cand_already_temp_scaled=True,
+                rng=rng,
+            )
+            if m:
+                step_metrics.append(m)
+    return aggregate_t1s_metrics(step_metrics, tvd_event_threshold=0.05)
 
 
 def _score_outputs(port: int, prompts: list[dict], outputs: list[dict], delta: float = 0.25) -> dict:
@@ -229,6 +341,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--per-suite", type=int, default=6)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=-1)
+    parser.add_argument("--t1s-top-logprobs", type=int, default=20)
+    parser.add_argument("--t1s-stock-cache-dir", type=Path, default=ROOT / "v2_runtime" / "cache" / "t1s_stock")
     parser.add_argument("--delta", type=float, default=0.25)
     parser.add_argument("--noise", type=float, default=0.002)
     args = parser.parse_args(argv)
@@ -236,18 +353,39 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     cand_env = json.loads(args.option_env)
     prompts = _load_prompts_for_model(per_suite=args.per_suite, model_path=args.model_path)
+    is_stochastic = float(args.temperature) > 0.0
+
+    # Check cached Stock T1-S baseline when temperature > 0
+    t1s_cache_k = None
+    cached_stock_t1s = None
+    if is_stochastic:
+        t1s_cache_k = stock_cache_key(
+            model_path=args.model_path or "Qwen3.8-27B",
+            stock_worktree=str(args.stock_worktree),
+            prompt_ids=[p["id"] for p in prompts],
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            max_new_tokens=args.max_new_tokens,
+        )
+        cached_stock_t1s = load_stock_cache(args.t1s_stock_cache_dir, t1s_cache_k)
+        if cached_stock_t1s is not None:
+            print(f"[controller] Loaded cached Stock T1-S baseline (key={t1s_cache_k})", flush=True)
 
     # --- T2: 2 Physical Rounds with GPU Swap (0 <-> 1) ---
     req_log_ratios: dict[str, list[float]] = {p["id"]: [] for p in prompts}
     round1_stock_rows: list[dict] = []
     round1_cand_rows: list[dict] = []
+    t1s_stock_rows: list[dict] = []
+    t1s_cand_rows: list[dict] = []
+    cand_stoch_check: dict | None = None
     all_outputs_identical = True
 
     for rnd in (1, 2):
         stock_gpu, cand_gpu = (0, 1) if rnd == 1 else (1, 0)
         p_stock, nccl_stock = _free_port(), _free_port()
         p_cand, nccl_cand = _free_port(), _free_port()
-        print(f"[controller] Round {rnd}: stock=GPU{stock_gpu} (port {p_stock}), cand=GPU{cand_gpu} (port {p_cand})", flush=True)
+        print(f"[controller] Round {rnd} (temp={args.temperature}): stock=GPU{stock_gpu} (port {p_stock}), cand=GPU{cand_gpu} (port {p_cand})", flush=True)
         proc_s = _start_arm(
             stock_gpu, args.stock_worktree, p_stock, nccl_stock, args.stock_draft_tokens, {},
             args.out_dir / f"r{rnd}_stock.log",
@@ -270,16 +408,16 @@ def main(argv: list[str] | None = None) -> int:
             # Paired warmup (2 short requests)
             for wp in prompts[:2]:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    fs = ex.submit(_gen_one, p_stock, wp, 32)
-                    fc = ex.submit(_gen_one, p_cand, wp, 32)
+                    fs = ex.submit(_gen_one, p_stock, wp, 32, args.temperature, args.top_p, args.top_k)
+                    fc = ex.submit(_gen_one, p_cand, wp, 32, args.temperature, args.top_p, args.top_k)
                     fs.result()
                     fc.result()
 
-            # Paired measurement (simultaneous per request)
+            # Paired measurement (simultaneous per request; return_logprob=False for clean timing)
             for p in prompts:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    fs = ex.submit(_gen_one, p_stock, p, args.max_new_tokens)
-                    fc = ex.submit(_gen_one, p_cand, p, args.max_new_tokens)
+                    fs = ex.submit(_gen_one, p_stock, p, args.max_new_tokens, args.temperature, args.top_p, args.top_k)
+                    fc = ex.submit(_gen_one, p_cand, p, args.max_new_tokens, args.temperature, args.top_p, args.top_k)
                     rs = fs.result()
                     rc = fc.result()
                 req_log_ratios[p["id"]].append(math.log(rc["tok_per_s"] / max(rs["tok_per_s"], 1e-6)))
@@ -288,6 +426,28 @@ def main(argv: list[str] | None = None) -> int:
                 if rnd == 1:
                     round1_stock_rows.append(rs)
                     round1_cand_rows.append(rc)
+
+            # In Round 1 for temp > 0: collect T1-S decode top-logprobs + stochasticity smoke
+            if rnd == 1 and is_stochastic:
+                cand_stoch_check = _check_stochasticity(
+                    p_cand, prompts[0], args.temperature, args.top_p, args.top_k
+                )
+                print(f"[controller] T1-S stochasticity smoke: {cand_stoch_check}", flush=True)
+                for p in prompts:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                        fc = ex.submit(
+                            _gen_one, p_cand, p, args.max_new_tokens,
+                            args.temperature, args.top_p, args.top_k, True, args.t1s_top_logprobs,
+                        )
+                        fs = None
+                        if cached_stock_t1s is None:
+                            fs = ex.submit(
+                                _gen_one, p_stock, p, args.max_new_tokens,
+                                args.temperature, args.top_p, args.top_k, True, args.t1s_top_logprobs,
+                            )
+                        t1s_cand_rows.append(fc.result())
+                        if fs is not None:
+                            t1s_stock_rows.append(fs.result())
         finally:
             _stop_server(proc_s)
             _stop_server(proc_c)
@@ -302,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"[controller] Paired 2-GPU swap CI: geomean={ci['geomean']:.5f} [{ci['lower']:.5f}, {ci['upper']:.5f}]", flush=True)
 
-    # --- T1: FP32 LM-Head Teacher-Forced Token Forcing ---
+    # --- T1 / T1-S: FP32 LM-Head Teacher-Forced Token Forcing ---
     print("[controller] Starting FP32 LM-head teacher-forced scorer on GPU 0...", flush=True)
     p_score, nccl_score = _free_port(), _free_port()
     proc_sc = _start_fp32_scorer(
@@ -311,24 +471,68 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         _wait_health(p_score, 600.0)
-        stock_tf = _score_outputs(p_score, prompts, round1_stock_rows, delta=args.delta)
-        cand_tf = _score_outputs(p_score, prompts, round1_cand_rows, delta=args.delta)
+        if is_stochastic:
+            if cached_stock_t1s is not None:
+                stock_t1s = cached_stock_t1s["metrics"]
+            else:
+                stock_t1s = _score_outputs_t1s(
+                    p_score, prompts, t1s_stock_rows,
+                    temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
+                    top_logprobs_num=args.t1s_top_logprobs,
+                )
+                if t1s_cache_k is not None:
+                    save_stock_cache(args.t1s_stock_cache_dir, t1s_cache_k, {
+                        "cache_key": t1s_cache_k,
+                        "temperature": args.temperature,
+                        "top_p": args.top_p,
+                        "top_k": args.top_k,
+                        "metrics": stock_t1s,
+                        "timestamp_unix": time.time(),
+                    })
+            cand_t1s = _score_outputs_t1s(
+                p_score, prompts, t1s_cand_rows,
+                temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
+                top_logprobs_num=args.t1s_top_logprobs,
+            )
+            t1s_eval = evaluate_t1s_verdict(stock_t1s, cand_t1s, cand_stoch_check)
+            t1_pass = bool(t1s_eval["t1s_pass"])
+            token_forcing_block = {
+                "mode": "T1-S_target_only",
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "top_k": args.top_k,
+                "stock_cached": cached_stock_t1s is not None,
+                "stock": stock_t1s,
+                "candidate": cand_t1s,
+                "stochasticity_check": cand_stoch_check,
+                "gates": t1s_eval,
+                "t1_pass": t1_pass,
+            }
+        else:
+            stock_tf = _score_outputs(p_score, prompts, round1_stock_rows, delta=args.delta)
+            cand_tf = _score_outputs(p_score, prompts, round1_cand_rows, delta=args.delta)
+            cand_lo = _wilson_low(cand_tf["mismatches"], cand_tf["total_tokens"], z=1.959964)
+            stock_hi = _wilson_high(stock_tf["mismatches"], stock_tf["total_tokens"], z=1.959964)
+            rate_pass = (cand_lo - stock_hi) <= 0.005
+            stock_event_hi = _wilson_high(stock_tf["large_margin_events"], stock_tf["total_tokens"], z=1.959964)
+            event_p = binom_one_sided(cand_tf["large_margin_events"], cand_tf["total_tokens"], max(stock_event_hi, 1e-6))
+            event_pass = (cand_tf["large_margin_events"] <= stock_tf["large_margin_events"]) or (event_p >= 0.025)
+            t1_pass = rate_pass and event_pass
+            token_forcing_block = {
+                "mode": "T1_greedy",
+                "delta": args.delta,
+                "stock": stock_tf,
+                "candidate": cand_tf,
+                "rate_pass": rate_pass,
+                "event_p": event_p,
+                "event_pass": event_pass,
+                "t1_pass": t1_pass,
+            }
     finally:
         _stop_server(proc_sc)
 
-    # Rate rule: cand lower bound - stock upper bound <= 0.005 (0.5 pp)
-    cand_lo = _wilson_low(cand_tf["mismatches"], cand_tf["total_tokens"], z=1.959964)
-    stock_hi = _wilson_high(stock_tf["mismatches"], stock_tf["total_tokens"], z=1.959964)
-    rate_pass = (cand_lo - stock_hi) <= 0.005
-
-    # Event rule: binomial test against upper bound of stock event rate
-    stock_event_hi = _wilson_high(stock_tf["large_margin_events"], stock_tf["total_tokens"], z=1.959964)
-    event_p = binom_one_sided(cand_tf["large_margin_events"], cand_tf["total_tokens"], max(stock_event_hi, 1e-6))
-    event_pass = (cand_tf["large_margin_events"] <= stock_tf["large_margin_events"]) or (event_p >= 0.025)
-    t1_pass = rate_pass and event_pass
-
     # T2 Promotion rule (paper-aligned-v1)
-    min_gain = (0.01 + 2.0 * args.noise) if all_outputs_identical else max(0.01 + 2.0 * args.noise, 0.03)
+    min_gain = (0.01 + 2.0 * args.noise) if (not is_stochastic and all_outputs_identical) else max(0.01 + 2.0 * args.noise, 0.03)
     t2_pass = (ci["lower"] - 1.0) > min_gain
     promoted = bool(t1_pass and t2_pass)
 
@@ -344,6 +548,9 @@ def main(argv: list[str] | None = None) -> int:
         "cand_draft_tokens": args.cand_draft_tokens,
         "requests": len(prompts),
         "max_new_tokens": args.max_new_tokens,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "top_k": args.top_k,
         "output_identical": all_outputs_identical,
         "performance": {
             "geomean_gain": round(ci["geomean"], 5),
@@ -356,15 +563,7 @@ def main(argv: list[str] | None = None) -> int:
             "round1_stock_tau": round(stock_tau, 4),
             "round1_cand_tau": round(cand_tau, 4),
         },
-        "token_forcing": {
-            "delta": args.delta,
-            "stock": stock_tf,
-            "candidate": cand_tf,
-            "rate_pass": rate_pass,
-            "event_p": event_p,
-            "event_pass": event_pass,
-            "t1_pass": t1_pass,
-        },
+        "token_forcing": token_forcing_block,
         "promoted": promoted,
         "timestamp_unix": time.time(),
     }

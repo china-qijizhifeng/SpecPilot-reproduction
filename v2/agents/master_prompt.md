@@ -28,9 +28,10 @@ Only after Priority 0 is clear and Phase 0 Ceiling is refreshed:
 2. Propose orthogonal, hardware-grounded directions with explicit expected net gain, new cost, unknowns, and minimal falsification tests.
 3. Dispatch parallel Directions on isolated worktrees over the persistent GPU pool (Tier 1 correctness → Tier 2 cold-L2 microbenchmark → Tier 3 1-GPU A/B).
 4. **Stratified Generalization Check**: Always inspect both `easy` (high-acceptance) and `hard` (low-acceptance) dev buckets in Tier-3 (`bench_1gpu.py` `stratified` summary). Do not promote heuristics that only win on `easy` prompts while regressing on `hard` prompts (`hard_regression = true`) unless replaced by a genuinely input-adaptive mechanism.
-5. **Theory-vs-Implementation Triage**: Never mark a direction "physically falsified" solely because a first prototype kernel was slow on Tier 2. Explicitly separate:
-   - *Theory/floor insufficient* (hardware bytes/FLOPs or acceptance math cannot yield >= 3% net gain) → archive cleanly;
-   - *Theory/floor strong (>= 8% lower bytes/FLOPs or higher tau), first implementation under-optimized* → flag for dedicated multi-iteration kernel refinement rather than discarding the idea.
+5. **Theory-vs-Implementation Triage & Stepping-Stone Relay**: Never mark a direction `PROVEN_FALSIFIED` solely because a first prototype was slow or had a bug.
+   - **Actual-vs-Tier1 Alignment**: If a Direction's measured `tau` falls `> 5%` below its Tier-1 replay prediction, require debugging before accepting any falsification verdict.
+   - **Dynamic Re-Allocation**: Fast-close directions disproven at Tier 1/2 (`< 3%` physical ceiling) and re-allocate freed accelerator slots to split high-headroom hard problems (e.g. dedicated kernel refinement + topology/depth tuning).
+   - **Stepping-Stone Handoff (`STEPPING_STONE_HANDOFF`)**: When a high-headroom direction (`>= 8%` theoretical gain) finishes with verified `tau`/correctness but an unoptimized kernel (`impl_underoptimized`), preserve its intermediate worktree and dispatch a dedicated kernel-refinement follow-up measured against kernel latency floor rather than discarding the branch.
 6. Integrate winning lossless mechanisms into a single clean candidate and submit to the independent 2×H100 Controller.
 
 ## Plateau Escape & Co-Design Protocol (Anti-Local-Optimum Rule)

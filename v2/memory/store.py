@@ -26,9 +26,154 @@ MEMORY_BASE = ROOT / "v2_runtime" / "memory"
 POSITIVE_DIR = MEMORY_BASE / "entries"
 NEGATIVE_DIR = MEMORY_BASE / "negative_entries"
 
-CONTEXT_DIMS = ("model", "hardware", "workload", "dataset")
+CONTEXT_DIMS = ("model", "spec", "hardware", "workload", "dataset")
+REQUIRED_CONTEXT_DIMS = ("model", "hardware", "workload", "dataset")
 VALID_FAILURE_CLASSES = ("theory_falsified", "impl_underoptimized", "t1_lossy_rejected")
 VALID_STATUSES = ("active", "superseded", "resolved")
+VALID_SAMPLING_COMPAT = (
+    "temp_agnostic",
+    "adapt_sampler_target_only",
+    "greedy_only",
+    "stochastic_only",
+)
+VALID_BATCH_REGIMES = ("any", "small_bs", "large_bs")
+
+
+def _get_nested(ctx: dict | None, dotted: str) -> Any:
+    cur: Any = ctx
+    for part in dotted.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def _normalize_ctx(ctx: dict | None) -> dict:
+    """Ensure 5-axis normalized view (derives `spec` from `model.drafter` if omitted)."""
+    if not isinstance(ctx, dict):
+        return {}
+    out = dict(ctx)
+    if "spec" not in out and isinstance(out.get("model"), dict) and out["model"].get("drafter"):
+        out["spec"] = {"algo": out["model"]["drafter"]}
+    return out
+
+
+def _infer_query_sampling_mode(query_ctx: dict | None) -> str | None:
+    """Return 'greedy', 'stochastic', or None from query_ctx['workload']."""
+    if not query_ctx or not isinstance(query_ctx.get("workload"), dict):
+        return None
+    wl = query_ctx["workload"]
+    if "temperature" in wl and wl["temperature"] is not None:
+        return "stochastic" if float(wl["temperature"]) > 0.0 else "greedy"
+    dec = str(wl.get("decoding", "")).lower()
+    if not dec:
+        return None
+    if "greedy" in dec or "temp0" in dec or "t=0" in dec:
+        return "greedy"
+    if "stochastic" in dec or "sample" in dec or "temp" in dec:
+        return "stochastic"
+    return None
+
+
+def assess_sampling_transfer(
+    entry_compat: str | None,
+    query_ctx: dict | None,
+    adaptation_note: str | None = None,
+) -> dict:
+    """Assess whether an entry's mechanism transfers to query_ctx's sampling regime."""
+    q_mode = _infer_query_sampling_mode(query_ctx)
+    if not entry_compat or not q_mode:
+        return {"transfer_status": "unknown", "query_mode": q_mode, "note": adaptation_note or ""}
+
+    if entry_compat == "temp_agnostic":
+        return {"transfer_status": "direct", "query_mode": q_mode, "note": adaptation_note or "Kernel/state optimization; valid for temp=0 and temp>0."}
+    if q_mode == "greedy":
+        if entry_compat in ("greedy_only", "adapt_sampler_target_only"):
+            return {"transfer_status": "direct", "query_mode": q_mode, "note": adaptation_note or ""}
+        return {"transfer_status": "incompatible", "query_mode": q_mode, "note": "Stochastic-only mechanism."}
+    # q_mode == "stochastic" (temp > 0)
+    if entry_compat == "stochastic_only":
+        return {"transfer_status": "direct", "query_mode": q_mode, "note": adaptation_note or ""}
+    if entry_compat == "adapt_sampler_target_only":
+        return {
+            "transfer_status": "adapt_required",
+            "query_mode": q_mode,
+            "note": adaptation_note or "Core kernel/tree is reusable; wire locked sgl_kernel.tree_speculative_sampling_target_only (draft_probs=0, threshold=1.0) + compute_spec_logprobs.",
+        }
+    return {
+        "transfer_status": "incompatible",
+        "query_mode": q_mode,
+        "note": adaptation_note or "Relies on greedy argmax assumption; do not transfer blindly to temp > 0.",
+    }
+
+
+def assess_transfer(entry: dict, query_ctx: dict | None) -> dict:
+    """General 5-axis transfer assessment across model, spec algo, GPU, workload/batch, and temp.
+
+    Returns:
+      - `verdict`: 'code_direct' | 'code_adapt' | 'pattern_transfer' | 'blocked' | 'unknown'
+      - `reasons`: list[str] explaining blocks or required adaptations
+      - `sampling`: dict from `assess_sampling_transfer`
+    """
+    if not query_ctx:
+        return {"verdict": "unknown", "reasons": [], "sampling": {"transfer_status": "unknown"}}
+
+    q = _normalize_ctx(query_ctx)
+    e = _normalize_ctx(entry.get("context"))
+    scope = entry.get("transfer_scope") or {}
+    reasons: list[str] = []
+
+    # 1. Sampling / temperature check
+    s_compat = scope.get("sampling_compatibility") or entry.get("sampling_compatibility")
+    s_note = scope.get("sampling_adaptation_note") or entry.get("sampling_adaptation_note")
+    st = assess_sampling_transfer(s_compat, q, s_note)
+    if st["transfer_status"] == "incompatible":
+        return {"verdict": "blocked", "reasons": [f"sampling:{s_compat} incompatible with {st['query_mode']}"], "sampling": st}
+
+    # 2. Batch regime check (small_bs: bs<=4, large_bs: bs>=8)
+    b_regime = scope.get("batch_regime", "any")
+    q_bs = _get_nested(q, "workload.batch_size")
+    if q_bs is not None and b_regime != "any":
+        if b_regime == "small_bs" and int(q_bs) > 4:
+            return {"verdict": "blocked", "reasons": [f"batch_regime:small_bs incompatible with bs={q_bs}"], "sampling": st}
+        if b_regime == "large_bs" and int(q_bs) < 8:
+            return {"verdict": "blocked", "reasons": [f"batch_regime:large_bs incompatible with bs={q_bs}"], "sampling": st}
+
+    # 3. Structural excludes (hard negative-transfer guard, e.g., wide tree on sparse_moe)
+    for field, forbidden_vals in (scope.get("pattern_excludes") or {}).items():
+        qv = _get_nested(q, field)
+        if qv is not None and qv in forbidden_vals:
+            return {"verdict": "blocked", "reasons": [f"excluded:{field}={qv}"], "sampling": st}
+
+    # 4. Structural requires (e.g., bf16 lossless compression requires dtype==bf16)
+    for field, allowed_vals in (scope.get("pattern_requires") or {}).items():
+        qv = _get_nested(q, field)
+        if qv is not None and qv not in allowed_vals:
+            return {"verdict": "blocked", "reasons": [f"requires:{field} in {allowed_vals} (got {qv})"], "sampling": st}
+
+    # 5. Distinguish code-level reuse vs abstract pattern-level transfer
+    code_fields = scope.get("code_replay_requires") or ["model.target", "spec.algo", "hardware.sm"]
+    code_mismatches: list[str] = []
+    for field in code_fields:
+        ev = _get_nested(e, field)
+        qv = _get_nested(q, field)
+        if ev is not None and qv is not None and ev != qv:
+            code_mismatches.append(f"{field}: {ev}->{qv}")
+
+    if entry.get("kind") == "negative":
+        # Negative entries are advisory warnings; surface as pattern_transfer if not blocked
+        return {"verdict": "pattern_transfer", "reasons": code_mismatches, "sampling": st}
+
+    if code_mismatches:
+        if st["transfer_status"] == "adapt_required":
+            reasons.append("sampler_adapt_target_only")
+        reasons.extend(code_mismatches)
+        return {"verdict": "pattern_transfer", "reasons": reasons, "sampling": st}
+
+    if st["transfer_status"] == "adapt_required":
+        return {"verdict": "code_adapt", "reasons": ["sampler_adapt_target_only"], "sampling": st}
+
+    return {"verdict": "code_direct", "reasons": [], "sampling": st}
 
 _FORBIDDEN_RE = re.compile(r"(eval/sealed/[^\s\"']+|\bsk-[A-Za-z0-9]{16,}|password\s*[:=])", re.IGNORECASE)
 
@@ -120,7 +265,7 @@ def record_negative_entry(
         raise ValueError(f"failure_class must be one of {VALID_FAILURE_CLASSES}, got {failure_class!r}")
     if status not in VALID_STATUSES:
         raise ValueError(f"status must be one of {VALID_STATUSES}, got {status!r}")
-    for dim in CONTEXT_DIMS:
+    for dim in REQUIRED_CONTEXT_DIMS:
         if dim not in context:
             raise ValueError(f"4D context missing required dimension: {dim!r}")
 
@@ -161,15 +306,21 @@ def enrich_positive_entry(
     one_line_summary: str,
     mechanism_card: dict | None = None,
     status: str = "active",
+    sampling_compatibility: str | None = None,
+    sampling_adaptation_note: str | None = None,
     memory_base: Path = MEMORY_BASE,
 ) -> dict:
-    """Non-destructively attach 4D context & bottleneck tags to an existing positive entry.
+    """Non-destructively attach 4D context, bottleneck tags & sampling compatibility.
 
     Does NOT touch delta.tar.gz or source_tree_sha, preserving byte-exact replay invariant.
     """
     if status not in VALID_STATUSES:
         raise ValueError(f"status must be one of {VALID_STATUSES}, got {status!r}")
-    for dim in CONTEXT_DIMS:
+    if sampling_compatibility is not None and sampling_compatibility not in VALID_SAMPLING_COMPAT:
+        raise ValueError(
+            f"sampling_compatibility must be one of {VALID_SAMPLING_COMPAT}, got {sampling_compatibility!r}"
+        )
+    for dim in REQUIRED_CONTEXT_DIMS:
         if dim not in context:
             raise ValueError(f"4D context missing required dimension: {dim!r}")
 
@@ -182,6 +333,10 @@ def enrich_positive_entry(
     manifest["one_line_summary"] = one_line_summary
     if mechanism_card is not None:
         manifest["mechanism_card"] = mechanism_card
+    if sampling_compatibility is not None:
+        manifest["sampling_compatibility"] = sampling_compatibility
+    if sampling_adaptation_note is not None:
+        manifest["sampling_adaptation_note"] = sampling_adaptation_note
     _assert_safe_payload(manifest)
     mpath.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     return manifest
@@ -210,6 +365,8 @@ def build_index(
     bottleneck_filter: list[str] | None = None,
     kind: str = "all",
     include_inactive: bool = False,
+    include_blocked: bool = False,
+    top_k: int | None = 10,
     memory_base: Path = MEMORY_BASE,
 ) -> list[dict]:
     """Stage-1 retrieval: build ranked 1-line summary index across positive & negative entries."""
@@ -227,7 +384,11 @@ def build_index(
         if bset and tag_hits == 0:
             continue
 
-        cm = match_context(m.get("context"), query_context)
+        cm = match_context(_normalize_ctx(m.get("context")), _normalize_ctx(query_context))
+        tr = assess_transfer(m, query_context)
+        if not include_blocked and tr["verdict"] == "blocked":
+            continue
+        st = tr["sampling"]
         one_line = m.get("one_line_summary") or m.get("summary", "")[:120]
         rows.append(
             {
@@ -241,13 +402,19 @@ def build_index(
                 "context_match": cm["match_level"],
                 "matched_dims": cm["matched_dims"],
                 "context_diffs": cm["diffs"],
+                "sampling_compatibility": m.get("sampling_compatibility"),
+                "sampling_transfer": st["transfer_status"],
+                "transfer_verdict": tr["verdict"],
+                "transfer_reasons": tr["reasons"],
                 "one_line_summary": one_line,
             }
         )
 
     level_rank = {"exact": 3, "partial": 2, "unscoped": 1, "mismatch": 0}
+    verdict_rank = {"code_direct": 4, "code_adapt": 3, "pattern_transfer": 2, "unknown": 1, "blocked": 0}
     rows.sort(
         key=lambda r: (
+            verdict_rank.get(r["transfer_verdict"], 1),
             r["tag_hits"],
             level_rank.get(r["context_match"], 0),
             r["matched_dims"],
@@ -255,6 +422,8 @@ def build_index(
         ),
         reverse=True,
     )
+    if top_k is not None and int(top_k) > 0:
+        rows = rows[: int(top_k)]
     return rows
 
 
@@ -265,7 +434,7 @@ def format_index_markdown(rows: list[dict]) -> str:
         "",
         "Use `python3 v2/memory/store.py show --id <ID>` to inspect full details on demand.",
         "",
-        "| ID | Kind | Status | Bottleneck | Context Match | Summary |",
+        "| ID | Kind | Transfer | Bottleneck | Context Match | Summary |",
         "|---|---|---|---|---|---|",
     ]
     for r in rows:
@@ -274,7 +443,10 @@ def format_index_markdown(rows: list[dict]) -> str:
         if r["context_diffs"]:
             cm = f"{cm} ({'; '.join(r['context_diffs'][:2])})"
         kind_lbl = r["kind"] if not r.get("failure_class") else f"neg:{r['failure_class']}"
-        lines.append(f"| `{r['id']}` | {kind_lbl} | {r['status']} | `{tags}` | {cm} | {r['one_line_summary']} |")
+        tv = r.get("transfer_verdict", "unknown")
+        if r.get("transfer_reasons"):
+            tv = f"{tv} ({'; '.join(r['transfer_reasons'][:2])})"
+        lines.append(f"| `{r['id']}` | {kind_lbl} | `{tv}` | `{tags}` | {cm} | {r['one_line_summary']} |")
     return "\n".join(lines) + "\n"
 
 
@@ -289,9 +461,12 @@ def show_entry(
     """Stage-2 retrieval: expand full details of a single entry and optionally log provenance."""
     for m, d in _load_all_entries(memory_base):
         if m["entry_id"] == entry_id:
-            cm = match_context(m.get("context"), query_context)
+            cm = match_context(_normalize_ctx(m.get("context")), _normalize_ctx(query_context))
+            tr = assess_transfer(m, query_context)
             out = dict(m)
             out["query_context_match"] = cm
+            out["query_transfer"] = tr
+            out["query_sampling_transfer"] = tr["sampling"]
             if include_patch and (d / "patch.diff").is_file():
                 out["patch_diff"] = (d / "patch.diff").read_text()
             if provenance_log is not None:

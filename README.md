@@ -48,11 +48,15 @@ GitHub：[china-qijizhifeng/SpecPilot-reproduction](https://github.com/china-qij
 ## 当前状态（已完成 / 正在做 / 接下来）
 
 - **已完成**：
-  - **`Qwen3.8-27B BF16 + DFlash2`（H100）全盲测 Round 1–6 闭环**：Dev **`1.7741×` / `342.46 tok/s`**（`6.64×` AR），Sealed **`1.7036×` / `298.95 tok/s`**，`0` 大 margin 事件，6 代 Memory 逐字节一致；
+  - **`Qwen3.8-27B BF16 + DFlash2`（H100，Greedy `temp=0`）全盲测 Round 1–6 闭环**：Dev **`1.7741×` / `342.46 tok/s`**（`6.64×` AR），Sealed **`1.7036×` / `298.95 tok/s`**，`0` 大 margin 事件，6 代 Memory 逐字节一致；
   - **论文 §6.1 无 Cost Model 单 Agent 消融**：`1.1173×`（`209.79 tok/s`），与 SpecPilot 首轮 `1.2960×` / R6 `1.7741×` 形成清晰无重叠 CI 对照；
-  - **跨模型/跨架构实战验证（`Qwen3.5-35B-A3B-FP8` 256 专家稀疏 MoE + 原生 MTP `NEXTN`）Round 1**：挂载 4D Structured Memory（成功拦住 27B 宽树负迁移 `0.893×`，精准迁移 FP8 Drafter `lm_head` / CUDA Graph / 零同步 EWMA 门控，并独立新发现 SM90 W8A16 FP8 MoE + Shared-MLP 融合算子）；经独立 2×H100 Controller 验收达 **`1.2771× [1.2591, 1.2958]`**（**`636.46 tok/s`** vs Stock MTP `507.92 tok/s`，`2.28×` AR，$\tau: 3.41 \to 4.34$；FP32 Token Forcing 不匹配率 `1.2145%` < Stock `1.2763%`，大 margin 事件 **`8` 少于 Stock 的 `12`**，`event_p = 0.9998`，**`promoted = true`**），并完成 `qwen35_35b_a3b_r1_moe_mtp` 逐字节 Memory 蒸馏；
-  - **`v2/` 通用系统升级**：P0 双端 Ceiling（支持 Dense / Hybrid / Sparse MoE）+ Easy/Hard 分层、P1 平台期破局、P3 双层 4D Structured Memory、通用 `controller_verify_2gpu.py`，**14/14 单元测试全部通过**。
-- **正在做**：两大不同架构模型（Dense BF16 + DFlash2、Sparse MoE FP8 + 原生 MTP）均已通过独立 2×H100 Controller 晋升并完成 4D Memory 沉淀。
+  - **跨模型/跨架构实战验证（`Qwen3.5-35B-A3B-FP8` 256 专家稀疏 MoE + 原生 MTP `NEXTN`）Round 1**：2×H100 Controller 验收达 **`1.2771× [1.2591, 1.2958]`**（**`636.46 tok/s`** vs Stock MTP `507.92 tok/s`，`2.28×` AR，$\tau: 3.41 \to 4.34$；FP32 Token Forcing 不匹配率 `1.2145%` < Stock `1.2763%`，大 margin 事件 **`8` 少于 Stock 的 `12`**，`event_p = 0.9998`，**`promoted = true`**）；
+  - **`temperature > 0`（Target-Only）全链路无损支持与盲测验证（Qwen3.8-27B，`T=0.7`）**：
+    - 新增 [v2/t1s_verify.py](v2/t1s_verify.py)（T1-S 分布 Token Forcing M1~M5：`TVD > 0.05` 事件、Mean/P99 TVD、`dlogp`、随机性冒烟 + 鞅检验 $Z_{\text{NLL}}/Z_{\text{top1}}$ + PIT-KS，以及 Stock 基线缓存）与 `tau_headroom.py` 树期望接受长度；
+    - 锁定官方 `sgl_kernel.tree_speculative_sampling_target_only`（`draft_probs=0, threshold=1.0`，链/树统一无损，20 万次蒙特卡洛最大单项误差 `0.00096`），`r6_tree_sampling_t07` 经 2×H100 Controller 验收达 **`1.5089× [1.4724, 1.5443]`**（`279.94 tok/s`，T1-S 全 5 项门禁通过）；
+    - **无记忆纯盲测 `temp=0.7` Round 1 & Round 2**：R1 达 **`1.1807× [1.1521, 1.2098]`**（`219.77 tok/s`，39 vs 41 Stock 事件，PIT-KS `p=0.681`），R2 达 **`1.2337× [1.2128, 1.2548]`**（`231.11 tok/s`，31 vs 41 Stock 事件，`mean_tvd=0.005265` < Stock `0.005332`，PIT-KS `p=0.911`），均 **`promoted = true`**；
+  - **原生探索能力与通用 5 轴可选 Memory 升级**：`direction_prompt.md` / `master_prompt.md` 落地深度迭代预算 + 三态结案协议（`PROMOTABLE` / `PROVEN_FALSIFIED` / `STEPPING_STONE_HANDOFF`）+ 实测/理论 $\tau$ 对齐检查；`v2/memory/store.py` 升级为 5 轴通用迁移引擎（默认关闭、支持 `code_direct / code_adapt / pattern_transfer / blocked` 自动隔离）；**17/17 单元测试全部通过**。
+- **正在做**：启动升级后的无记忆盲测 `temp=0.7` Round 3，验证三态结案与 Stepping-Stone 接力机制的原生破局能力。
 - **接下来（可选）**：继续推进 `Qwen3.5-35B-A3B-FP8` Round 2 或扩展大 Batch（`bs=8/16`）场景验证。
 
 ---
@@ -60,7 +64,7 @@ GitHub：[china-qijizhifeng/SpecPilot-reproduction](https://github.com/china-qij
 ## 快速自检
 
 ```bash
-# 运行 SpecPilot v2 全部 CPU 单元测试（14 项）
+# 运行 SpecPilot v2 全部 CPU 单元测试（17 项）
 python3 -m unittest discover -s v2/tests -p 'test_*.py' -v
 
 # 查看本地双层 Structured Memory 1 行摘要索引

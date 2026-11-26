@@ -1,5 +1,14 @@
 # HANDOFF — 交接给新 session
 
+## H100最新收口：SpecPilot v2 `temperature > 0` Target-Only 闭环与原生探索协议升级（2026-11-26）
+
+- **全链路 `temp > 0` Target-Only 无损支持**：新增 [v2/t1s_verify.py](v2/t1s_verify.py)（T1-S 分布 Token Forcing M1~M5 + Stock 基线缓存）、集成进 `v2/controller_verify_2gpu.py` / `v2/phase0/{tau_headroom,measure_stock}.py` / `v2/sandbox/bench_1gpu.py`，并撰写整理笔记 [docs/notes/speculative-rejection-sampling.md](docs/notes/speculative-rejection-sampling.md)。
+- **2×H100 Controller T1-S + T2 实测（Qwen3.8-27B BF16 + DFlash2，`T=0.7`，30 题 × 1024 tokens）**：
+  - `r6-tree-sampling-t07`（28 节点树 + 锁定 Target-Only 核）：**`1.5089× [1.4724, 1.5443]`**（`279.94 tok/s`, $\tau=6.15$，T1-S 全过，`mean_tvd=0.005359` vs Stock `0.005332`，PIT-KS `p=0.238`）；
+  - **无记忆纯盲测 `temp=0.7` Round 1**（`t07-blind-r1-d1d2d5`）：**`1.1807× [1.1521, 1.2098]`**（`219.77 tok/s`，39 vs 41 Stock 事件，PIT-KS `p=0.681`，`promoted=true`）；
+  - **无记忆纯盲测 `temp=0.7` Round 2**（`t07-blind-r2-d1d2v2d5`）：**`1.2337× [1.2128, 1.2548]`**（`231.11 tok/s`，31 vs 41 Stock 事件，`mean_tvd=0.005265` < Stock `0.005332`，PIT-KS `p=0.911`，`promoted=true`）。
+- **原生探索协议与可选 5 轴 Memory 升级**：`v2/agents/{direction_prompt,master_prompt}.md` 落地深度迭代预算 + 三态结案协议（`PROMOTABLE` / `PROVEN_FALSIFIED` / `STEPPING_STONE_HANDOFF`）+ 实测/理论 $\tau$ 对齐检查；`v2/memory/store.py` 升级 5 轴通用迁移引擎（默认关闭、默认隐藏 `blocked`）。**17/17 单元测试通过**。
+
 ## H100最新收口：SpecPilot v2 全盲测闭环（Round 1–4，2026-11-25）
 
 已完成 SpecPilot v2 完整自主闭环（`v2/`）及 Round 1–4 严格盲测独立优化与验证（审计 0 联网、0 读禁区、`controller/` 与 `eval/sealed/` 未修改）。

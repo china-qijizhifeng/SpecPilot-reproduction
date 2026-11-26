@@ -96,17 +96,94 @@ def oracle_step_acceptance(pos_match_ranks: list[int]) -> int:
     return acc + 1
 
 
+def best_first_tree_expected_acceptance(
+    pos_top_probs: list[list[float]],
+    pos_target_probs: list[list[float]],
+    budget: int,
+    pos_token_ids: list[list[int]] | None = None,
+) -> float:
+    """Exact Target-Only expected acceptance E[tau(T)] = 1 + sum_{u != root} P_target(reach u).
+
+    Builds the same draft-probability best-first tree of size `budget` as
+    `best_first_tree_acceptance`, then accumulates exact target reach probabilities
+    under Target-Only (q=1) tree rejection sampling (deduplicating identical sibling
+    tokens under the same parent). Reduces identically to `best_first_tree_acceptance`
+    when `pos_target_probs` are 0/1 greedy indicators.
+    """
+    if budget <= 1 or not pos_top_probs:
+        return 1.0
+
+    max_depth = min(len(pos_top_probs), len(pos_target_probs))
+    # Priority queue of (-draft_cum_prob, depth, parent_id, token_key, target_reach_prob)
+    pq: list[tuple[float, int, int, int, float]] = []
+    seen_siblings: dict[int, set[int]] = {}
+
+    for r, p_d in enumerate(pos_top_probs[0]):
+        if p_d <= 0.0:
+            continue
+        p_t = float(pos_target_probs[0][r]) if r < len(pos_target_probs[0]) else 0.0
+        tok_key = int(pos_token_ids[0][r]) if (pos_token_ids and r < len(pos_token_ids[0])) else r
+        heapq.heappush(pq, (-float(p_d), 0, 0, tok_key, max(0.0, min(1.0, p_t))))
+
+    used = 1  # root node id = 0
+    expected_draft_acc = 0.0
+    next_node_id = 1
+
+    while pq and used < budget:
+        neg_dprob, depth, parent_id, tok_key, t_reach = heapq.heappop(pq)
+        sibs = seen_siblings.setdefault(parent_id, set())
+        if tok_key in sibs:
+            # Duplicate sibling under same parent has 0 effective Target-Only mass
+            continue
+        sibs.add(tok_key)
+        node_id = next_node_id
+        next_node_id += 1
+        used += 1
+        expected_draft_acc += t_reach
+
+        dprob = -neg_dprob
+        next_d = depth + 1
+        if next_d < max_depth:
+            for r, p_child in enumerate(pos_top_probs[next_d]):
+                if p_child <= 0.0:
+                    continue
+                p_t_child = float(pos_target_probs[next_d][r]) if r < len(pos_target_probs[next_d]) else 0.0
+                child_key = int(pos_token_ids[next_d][r]) if (pos_token_ids and r < len(pos_token_ids[next_d])) else r
+                heapq.heappush(
+                    pq,
+                    (
+                        -(dprob * float(p_child)),
+                        next_d,
+                        node_id,
+                        child_key,
+                        t_reach * max(0.0, min(1.0, p_t_child)),
+                    ),
+                )
+
+    return 1.0 + expected_draft_acc
+
+
+def oracle_step_expected_acceptance(pos_target_probs: list[list[float]]) -> float:
+    """Upper bound E[tau] if all distinct top-K draft candidates at every depth were verified."""
+    reach = 1.0
+    total = 1.0
+    for probs in pos_target_probs:
+        layer_mass = min(1.0, sum(max(0.0, float(p)) for p in probs))
+        reach *= layer_mass
+        total += reach
+    return total
+
+
 def analyze_tau_headroom(
     steps: Iterable[dict],
     budgets: tuple[int, ...] = (8, 16, 32, 64, 96),
     lookahead_agreement_rate: float | None = None,
+    temperature: float = 0.0,
 ) -> dict:
     """Compute exact-replay acceptance ceiling curve over a sequence of step traces.
 
-    Each step dict supports:
-      - `accepted_tokens` (int): actual tokens committed on that step
-      - `pos_top_probs` (list[list[float]]): per-depth top-K draft probabilities
-      - `pos_match_ranks` (list[int]): per-depth rank of target greedy token (-1 if miss)
+    Supports both greedy (`temperature == 0.0`, using `pos_match_ranks`) and
+    stochastic Target-Only (`temperature > 0.0`, using `pos_target_probs`).
     """
     step_list = list(steps)
     if not step_list:
@@ -114,27 +191,45 @@ def analyze_tau_headroom(
 
     n = len(step_list)
     tau_measured = sum(int(s["accepted_tokens"]) for s in step_list) / n
-    oracle_vals = [oracle_step_acceptance(s["pos_match_ranks"]) for s in step_list]
-    tau_oracle = sum(oracle_vals) / n
+    use_stochastic = (float(temperature) > 0.0) or ("pos_target_probs" in step_list[0])
 
-    by_budget: dict[str, float] = {}
-    for b in budgets:
-        vals = [
-            best_first_tree_acceptance(s["pos_top_probs"], s["pos_match_ranks"], budget=int(b))
-            for s in step_list
-        ]
-        by_budget[str(b)] = round(sum(vals) / n, 4)
+    if use_stochastic:
+        oracle_vals = [oracle_step_expected_acceptance(s["pos_target_probs"]) for s in step_list]
+        tau_oracle = sum(oracle_vals) / n
+        by_budget: dict[str, float] = {}
+        for b in budgets:
+            vals = [
+                best_first_tree_expected_acceptance(
+                    s["pos_top_probs"],
+                    s["pos_target_probs"],
+                    budget=int(b),
+                    pos_token_ids=s.get("pos_token_ids"),
+                )
+                for s in step_list
+            ]
+            by_budget[str(b)] = round(sum(vals) / n, 4)
+    else:
+        oracle_vals = [oracle_step_acceptance(s["pos_match_ranks"]) for s in step_list]
+        tau_oracle = sum(oracle_vals) / n
+        by_budget = {}
+        for b in budgets:
+            vals = [
+                best_first_tree_acceptance(s["pos_top_probs"], s["pos_match_ranks"], budget=int(b))
+                for s in step_list
+            ]
+            by_budget[str(b)] = round(sum(vals) / n, 4)
 
     tau_best = max(by_budget.values()) if by_budget else round(tau_oracle, 4)
 
     la_loss = None
     if lookahead_agreement_rate is not None:
         agree = max(0.0, min(1.0, float(lookahead_agreement_rate)))
-        # Approximate expected tokens lost to lookahead disagreement when chaining
         la_loss = round(max(tau_best - tau_measured, 0.0) * (1.0 - agree) / max(1.0 - agree + 0.05, 1e-6), 4)
 
     return {
         "num_steps": n,
+        "temperature": float(temperature),
+        "sampling_mode": "stochastic_target_only" if use_stochastic else "greedy",
         "tau_measured": round(tau_measured, 4),
         "tau_best": round(tau_best, 4),
         "tau_oracle": round(tau_oracle, 4),
@@ -150,13 +245,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trace-jsonl", type=Path, required=True)
     parser.add_argument("--budgets", type=str, default="8,16,32,64,96")
+    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--lookahead-agreement", type=float, default=None)
     parser.add_argument("--out-json", type=Path, default=None)
     args = parser.parse_args(argv)
 
     budgets = tuple(int(x.strip()) for x in args.budgets.split(",") if x.strip())
     steps = [json.loads(line) for line in args.trace_jsonl.read_text().splitlines() if line.strip()]
-    res = analyze_tau_headroom(steps, budgets=budgets, lookahead_agreement_rate=args.lookahead_agreement)
+    res = analyze_tau_headroom(
+        steps,
+        budgets=budgets,
+        lookahead_agreement_rate=args.lookahead_agreement,
+        temperature=args.temperature,
+    )
     text = json.dumps(res, indent=2, ensure_ascii=False) + "\n"
     if args.out_json:
         args.out_json.parent.mkdir(parents=True, exist_ok=True)
