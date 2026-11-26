@@ -309,6 +309,38 @@ def show_entry(
     raise KeyError(f"Memory entry not found: {entry_id!r}")
 
 
+def update_entry_status(
+    *,
+    entry_id: str,
+    status: str,
+    resolved_by: str | None = None,
+    superseded_by: str | None = None,
+    reopen_condition: str | None = None,
+    memory_base: Path = MEMORY_BASE,
+) -> dict:
+    """Controller/maintainer-only lifecycle update for positive or negative entries.
+
+    Only mutates governance metadata (`status`, `resolved_by`, `superseded_by`,
+    `reopen_condition`). Never modifies immutable evidence, delta.tar.gz, or TREE_SHA.
+    """
+    if status not in VALID_STATUSES:
+        raise ValueError(f"status must be one of {VALID_STATUSES}, got {status!r}")
+    for m, d in _load_all_entries(memory_base):
+        if m["entry_id"] == entry_id:
+            m["status"] = status
+            if resolved_by is not None:
+                m["resolved_by"] = resolved_by
+            if superseded_by is not None:
+                m["superseded_by"] = superseded_by
+            if reopen_condition is not None:
+                m["reopen_condition"] = reopen_condition
+            m["updated_unix"] = time.time()
+            _assert_safe_payload(m)
+            (d / "manifest.json").write_text(json.dumps(m, indent=2, ensure_ascii=False) + "\n")
+            return m
+    raise KeyError(f"Memory entry not found: {entry_id!r}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--memory-base", type=Path, default=MEMORY_BASE)
@@ -326,6 +358,13 @@ def main(argv: list[str] | None = None) -> int:
     p_show.add_argument("--context-json", type=str, default=None)
     p_show.add_argument("--include-patch", action="store_true")
     p_show.add_argument("--log-provenance", type=Path, default=None)
+
+    p_upd = sub.add_parser("update-status", help="Maintainer/Controller: update lifecycle status without altering evidence")
+    p_upd.add_argument("--id", required=True)
+    p_upd.add_argument("--status", choices=VALID_STATUSES, required=True)
+    p_upd.add_argument("--resolved-by", default=None)
+    p_upd.add_argument("--superseded-by", default=None)
+    p_upd.add_argument("--reopen-condition", default=None)
 
     args = parser.parse_args(argv)
     q_ctx = json.loads(args.context_json) if args.context_json else None
@@ -353,6 +392,18 @@ def main(argv: list[str] | None = None) -> int:
             memory_base=args.memory_base,
         )
         print(json.dumps(detail, indent=2, ensure_ascii=False))
+        return 0
+
+    if args.cmd == "update-status":
+        updated = update_entry_status(
+            entry_id=args.id,
+            status=args.status,
+            resolved_by=args.resolved_by,
+            superseded_by=args.superseded_by,
+            reopen_condition=args.reopen_condition,
+            memory_base=args.memory_base,
+        )
+        print(json.dumps(updated, indent=2, ensure_ascii=False))
         return 0
 
     return 0

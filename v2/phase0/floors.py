@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Hardware-exact byte/FLOP floor table and 3-factor Ceiling for Qwen3.8-27B + DFlash2.
+"""Hardware-exact byte/FLOP floor table and 3-factor Ceiling (SpecPilot §3.1).
 
 Implements SpecPilot §3.1 Eq. (3)-(4):
     S(N) = tau(N) / c(N),   c(N) = T_step(N) / T_AR
     Ceiling = (tau_best / tau) * (T_prof / T_floor) * (T_step / T_prof)
     T_floor(class) = max(FLOPs / (0.60 * dense_peak), bytes / (0.90 * hbm_bw))
 
-All dimensions are loaded directly from the target & drafter config.json files
-so there is zero magic hardcoding and zero unattributed 'other_unknown' guesswork.
+Model- and hardware-agnostic: dimensions are loaded directly from target & drafter
+config.json files (supporting both pure Transformer and hybrid linear/full-attention
+models) and device specs are selectable via DEVICE_PRESETS or custom DeviceSpec.
 """
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,9 +37,44 @@ H100_SXM5 = DeviceSpec(
     bf16_peak_flops=989e12,
     hbm_bw_bytes_s=3.35e12,
 )
+H200_SXM5 = DeviceSpec(
+    name="H200-SXM5-141GB",
+    bf16_peak_flops=989e12,
+    hbm_bw_bytes_s=4.80e12,
+)
+B200_SXM6 = DeviceSpec(
+    name="B200-SXM6-192GB",
+    bf16_peak_flops=2250e12,
+    hbm_bw_bytes_s=8.00e12,
+)
+RTX_PRO_6000 = DeviceSpec(
+    name="RTX-PRO-6000-Blackwell",
+    bf16_peak_flops=500e12,
+    hbm_bw_bytes_s=1.51e12,
+)
+ASCEND_910B2C = DeviceSpec(
+    name="Ascend-910B2C",
+    bf16_peak_flops=354e12,
+    hbm_bw_bytes_s=1.60e12,
+)
 
-DEFAULT_TARGET_CFG = Path("/gpfs/models/huggingface.co/Qwen/Qwen3.8-27B/config.json")
-DEFAULT_DRAFT_CFG = Path("/gpfs/users/jixinpeng/models/z-lab/Qwen3.8-27B-DFlash2/config.json")
+DEVICE_PRESETS: dict[str, DeviceSpec] = {
+    d.name: d for d in (H100_SXM5, H200_SXM5, B200_SXM6, RTX_PRO_6000, ASCEND_910B2C)
+}
+
+
+def get_device_spec(name: str) -> DeviceSpec:
+    if name not in DEVICE_PRESETS:
+        raise KeyError(f"Unknown device preset {name!r}; available: {sorted(DEVICE_PRESETS)}")
+    return DEVICE_PRESETS[name]
+
+
+DEFAULT_TARGET_CFG = Path(
+    os.environ.get("SP_TARGET_CONFIG", "/gpfs/models/huggingface.co/Qwen/Qwen3.8-27B/config.json")
+)
+DEFAULT_DRAFT_CFG = Path(
+    os.environ.get("SP_DRAFT_CONFIG", "/gpfs/users/jixinpeng/models/z-lab/Qwen3.8-27B-DFlash2/config.json")
+)
 
 
 def compute_class_workloads(
@@ -60,33 +97,47 @@ def compute_class_workloads(
     h = int(tc["hidden_size"])
     inter = int(tc["intermediate_size"])
     vocab = int(tc["vocab_size"])
-    layer_types = list(tc["layer_types"])
-    n_layers = len(layer_types)
-    n_gdn = sum(1 for t in layer_types if t == "linear_attention")
-    n_attn = sum(1 for t in layer_types if t == "full_attention")
+    if "layer_types" in tc:
+        layer_types = list(tc["layer_types"])
+        n_layers = len(layer_types)
+        n_gdn = sum(1 for t in layer_types if t == "linear_attention")
+        n_attn = sum(1 for t in layer_types if t == "full_attention")
+    else:
+        n_layers = int(tc["num_hidden_layers"])
+        n_gdn = 0
+        n_attn = n_layers
 
     # Full attention dimensions
     n_q_heads = int(tc["num_attention_heads"])
-    n_kv_heads = int(tc["num_key_value_heads"])
-    head_dim = int(tc["head_dim"])
+    n_kv_heads = int(tc.get("num_key_value_heads", n_q_heads))
+    head_dim = int(tc.get("head_dim", h // n_q_heads))
     q_out = n_q_heads * head_dim * (2 if tc.get("attn_output_gate", False) else 1)
     k_out = n_kv_heads * head_dim
     v_out = n_kv_heads * head_dim
     o_in = n_q_heads * head_dim
 
-    # GDN (Gated DeltaNet) dimensions
-    gdn_k_heads = int(tc["linear_num_key_heads"])
-    gdn_k_dim = int(tc["linear_key_head_dim"])
-    gdn_v_heads = int(tc["linear_num_value_heads"])
-    gdn_v_dim = int(tc["linear_value_head_dim"])
-    gdn_conv_k = int(tc.get("linear_conv_kernel_dim", 4))
-    gdn_qkvz_out = 2 * gdn_k_heads * gdn_k_dim + 2 * gdn_v_heads * gdn_v_dim
-    gdn_ba_out = 2 * gdn_v_heads
-    gdn_out_in = gdn_v_heads * gdn_v_dim
+    # GDN (Gated DeltaNet / linear attention) dimensions (0 for pure-attention models)
+    if n_gdn > 0:
+        gdn_k_heads = int(tc["linear_num_key_heads"])
+        gdn_k_dim = int(tc["linear_key_head_dim"])
+        gdn_v_heads = int(tc["linear_num_value_heads"])
+        gdn_v_dim = int(tc["linear_value_head_dim"])
+        gdn_conv_k = int(tc.get("linear_conv_kernel_dim", 4))
+        gdn_qkvz_out = 2 * gdn_k_heads * gdn_k_dim + 2 * gdn_v_heads * gdn_v_dim
+        gdn_ba_out = 2 * gdn_v_heads
+        gdn_out_in = gdn_v_heads * gdn_v_dim
+        gdn_proj_params = h * gdn_qkvz_out + h * gdn_ba_out + gdn_out_in * h
+        state_elems_per_layer = gdn_v_heads * gdn_k_dim * gdn_v_dim
+        conv_channels = 2 * gdn_k_heads * gdn_k_dim + gdn_v_heads * gdn_v_dim
+        gdn_state_bytes = n_gdn * (2 * state_elems_per_layer * 4 + 2 * conv_channels * gdn_conv_k * 2)
+        gdn_state_flops = n_gdn * verify_rows * 6.0 * state_elems_per_layer
+    else:
+        gdn_proj_params = 0
+        gdn_state_bytes = 0.0
+        gdn_state_flops = 0.0
 
     # 1) target_gemm: all decoder linear projections (MLP + GDN proj + Attn proj)
     mlp_params_per_layer = h * (2 * inter) + inter * h  # gate_up + down
-    gdn_proj_params = h * gdn_qkvz_out + h * gdn_ba_out + gdn_out_in * h
     attn_proj_params = h * (q_out + k_out + v_out) + o_in * h
     target_linear_params = (
         n_layers * mlp_params_per_layer
@@ -101,23 +152,19 @@ def compute_class_workloads(
     lm_head_bytes = lm_head_params * weight_bytes_per_elem * lm_head_passes_per_step
     lm_head_flops = 2.0 * lm_head_params * verify_rows * lm_head_passes_per_step
 
-    # 3) gdn_recurrent: FP32 state [n_v_heads, k_dim, v_dim] read + write per layer + conv state
-    state_elems_per_layer = gdn_v_heads * gdn_k_dim * gdn_v_dim
-    conv_channels = 2 * gdn_k_heads * gdn_k_dim + gdn_v_heads * gdn_v_dim
-    gdn_state_bytes = n_gdn * (2 * state_elems_per_layer * 4 + 2 * conv_channels * gdn_conv_k * 2)
-    # Per-token rank-1 delta rule update: ~6 * state_elems FLOPs per token per layer
-    gdn_state_flops = n_gdn * verify_rows * 6.0 * state_elems_per_layer
-
     # 4) attention: KV cache read across full_attention layers (BF16 K and V)
     attn_kv_bytes = n_attn * 2 * n_kv_heads * head_dim * kv_len * 2
     attn_flops = n_attn * verify_rows * 4.0 * n_q_heads * head_dim * kv_len
 
-    # 5) drafter (DFlash2): 5 transformer layers + feature fusion + selector + lm_head
+    # 5) drafter: transformer layers + optional feature fusion + lm_head
     dh = int(draft_cfg["hidden_size"])
     dinter = int(draft_cfg["intermediate_size"])
     dlayers = int(draft_cfg["num_hidden_layers"])
-    dq = int(draft_cfg["num_attention_heads"]) * int(draft_cfg["head_dim"])
-    dkv = int(draft_cfg["num_key_value_heads"]) * int(draft_cfg["head_dim"])
+    dq_heads = int(draft_cfg["num_attention_heads"])
+    dkv_heads = int(draft_cfg.get("num_key_value_heads", dq_heads))
+    dhead_dim = int(draft_cfg.get("head_dim", dh // dq_heads))
+    dq = dq_heads * dhead_dim
+    dkv = dkv_heads * dhead_dim
     d_target_layers = len(draft_cfg.get("dflash_config", {}).get("target_layer_ids", [5, 19, 33, 47, 61]))
     d_layer_params = dh * (dq + 2 * dkv) + dq * dh + dh * (2 * dinter) + dinter * dh
     d_fc_params = (d_target_layers * dh) * dh

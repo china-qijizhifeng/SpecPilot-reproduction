@@ -5,12 +5,18 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import shutil
 from pathlib import Path
 
 from harness.build_engine import SKIP_DIRS, tree_sha
 
-STOCK_ENGINE_DEFAULT = Path("/gpfs/users/jixinpeng/specpilot_data/work/engines/h100_c1_qwen38-27b_dflash2-stock")
+STOCK_ENGINE_DEFAULT = Path(
+    os.environ.get(
+        "SP_STOCK_ENGINE",
+        "/gpfs/users/jixinpeng/specpilot_data/work/engines/h100_c1_qwen38-27b_dflash2-stock",
+    )
+)
 
 
 def _skip(rel: Path) -> bool:

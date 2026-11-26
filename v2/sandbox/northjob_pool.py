@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-NORTHJOB = "/gpfs/users/jixinpeng/miniconda3/envs/dev/bin/northjob"
+NORTHJOB = os.environ.get("NORTHJOB_BIN", "/gpfs/users/jixinpeng/miniconda3/envs/dev/bin/northjob")
 DEFAULT_IMAGE = "harbor.local.clusters/bp/oss-sglang@sha256:6e9415fcf90dbe66f14e994a7f7c51cb242db3805b1910ce7bd6d0b8e8db0798"
 TOLERATION = "key=task-type,operator=Equal,value=infra-dev-weaver,effect=NoSchedule"
 

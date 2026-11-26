@@ -21,8 +21,16 @@ from v2.memory.store import (
     match_context,
     record_negative_entry,
     show_entry,
+    update_entry_status,
 )
-from v2.phase0.floors import H100_SXM5, compute_ceiling_report, compute_class_workloads, format_master_brief
+from v2.phase0.floors import (
+    DEVICE_PRESETS,
+    H100_SXM5,
+    compute_ceiling_report,
+    compute_class_workloads,
+    format_master_brief,
+    get_device_spec,
+)
 from v2.phase0.tau_headroom import analyze_tau_headroom, best_first_tree_acceptance, oracle_step_acceptance
 from v2.sandbox.bench_1gpu import stratify_easy_hard
 from v2.sandbox.northjob_pool import attach_model_pvc, build_create_args
@@ -123,6 +131,32 @@ class TestPhase0Floors(unittest.TestCase):
         self.assertIn("Acceptance Headroom (Exact Replay)", brief)
         self.assertIn("lookahead_gemm", brief)
 
+    def test_floors_generic_pure_attention_model_and_device_presets(self):
+        # Standard dense pure-attention Transformer (no GDN / layer_types fields)
+        llama_like = {
+            "hidden_size": 4096,
+            "intermediate_size": 14336,
+            "vocab_size": 128256,
+            "num_hidden_layers": 32,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+        }
+        draft_like = {
+            "hidden_size": 4096,
+            "intermediate_size": 14336,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+        }
+        b200 = get_device_spec("B200-SXM6-192GB")
+        ascend = get_device_spec("Ascend-910B2C")
+        self.assertIn("H100-SXM5-80GB", DEVICE_PRESETS)
+        w = compute_class_workloads(target_cfg=llama_like, draft_cfg=draft_like, verify_rows=16, draft_block=8)
+        self.assertEqual(w["gdn_recurrent"]["bytes"], 0.0)
+        self.assertGreater(w["target_gemm"]["bytes"], 10e9)
+        self.assertLess(b200.floor_ms(w["target_gemm"]["flops"], w["target_gemm"]["bytes"]),
+                        ascend.floor_ms(w["target_gemm"]["flops"], w["target_gemm"]["bytes"]))
+
 
 class TestStratifiedBenchAndProtocol(unittest.TestCase):
     def test_stratify_easy_hard_detects_hard_regression(self):
@@ -160,6 +194,13 @@ class TestStratifiedBenchAndProtocol(unittest.TestCase):
         # Must remain 100% generic (no paper/solution hints)
         for forbidden in ("BM=32", "Huffman", "W12", "W6", "2.13x", "DFloat11"):
             self.assertNotIn(forbidden, prompt)
+
+    def test_direction_prompt_is_model_and_hardware_agnostic(self):
+        dprompt = (ROOT / "v2" / "agents" / "direction_prompt.md").read_text()
+        for required in ("stratified.easy", "stratified.hard", "hard_regression", "theory_falsified", "impl_underoptimized", "reused_from"):
+            self.assertIn(required, dprompt)
+        for hardcoded in ("Qwen3.8", "DFlash2", "H100", "SGLang v0.5.20"):
+            self.assertNotIn(hardcoded, dprompt)
 
 
 class TestDualLayerMemoryStore(unittest.TestCase):
@@ -253,6 +294,19 @@ class TestDualLayerMemoryStore(unittest.TestCase):
             self.assertIn("register bit-parallel", detail["reopen_condition"])
             prov_lines = [json.loads(l) for l in prov.read_text().splitlines() if l.strip()]
             self.assertEqual(prov_lines[0]["reused_from"], "neg_r1_impl")
+
+            # Maintainer lifecycle update preserves immutable evidence & removes from active index
+            upd = update_entry_status(
+                entry_id="neg_r1_impl",
+                status="resolved",
+                resolved_by="pos_r2",
+                memory_base=mem_base,
+            )
+            self.assertEqual(upd["status"], "resolved")
+            self.assertEqual(upd["resolved_by"], "pos_r2")
+            self.assertEqual(upd["evidence"]["tier2_ratio"], 0.60)
+            active_rows = build_index(query_context=self._ctx(bs=1), memory_base=mem_base)
+            self.assertEqual([r["id"] for r in active_rows], ["pos_r1"])
 
     def test_memory_rejects_sealed_paths_and_secrets(self):
         with tempfile.TemporaryDirectory() as td:
