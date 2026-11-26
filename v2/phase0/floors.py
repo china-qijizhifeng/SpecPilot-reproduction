@@ -95,7 +95,6 @@ def compute_class_workloads(
     """Compute exact bytes & FLOPs per speculative step for each kernel class."""
     tc = target_cfg.get("text_config", target_cfg)
     h = int(tc["hidden_size"])
-    inter = int(tc["intermediate_size"])
     vocab = int(tc["vocab_size"])
     if "layer_types" in tc:
         layer_types = list(tc["layer_types"])
@@ -136,16 +135,30 @@ def compute_class_workloads(
         gdn_state_bytes = 0.0
         gdn_state_flops = 0.0
 
-    # 1) target_gemm: all decoder linear projections (MLP + GDN proj + Attn proj)
-    mlp_params_per_layer = h * (2 * inter) + inter * h  # gate_up + down
+    # 1) target_gemm: decoder linear projections (Dense MLP or Sparse MoE + GDN/Attn proj)
     attn_proj_params = h * (q_out + k_out + v_out) + o_in * h
-    target_linear_params = (
-        n_layers * mlp_params_per_layer
-        + n_gdn * gdn_proj_params
-        + n_attn * attn_proj_params
-    )
-    target_gemm_bytes = target_linear_params * weight_bytes_per_elem
-    target_gemm_flops = 2.0 * target_linear_params * verify_rows
+    non_mlp_params = n_gdn * gdn_proj_params + n_attn * attn_proj_params
+    num_experts = int(tc.get("num_experts", 0))
+    if num_experts > 0 and "moe_intermediate_size" in tc:
+        moe_inter = int(tc["moe_intermediate_size"])
+        top_k = int(tc.get("num_experts_per_tok", 2))
+        shared_inter = int(tc.get("shared_expert_intermediate_size", 0))
+        one_expert_params = 3 * h * moe_inter
+        shared_params = (3 * h * shared_inter) if shared_inter > 0 else 0
+        router_params = h * num_experts
+        # Expected distinct experts touched across verify_rows tokens (uniform routing upper bound)
+        exp_distinct = num_experts * (1.0 - (1.0 - min(top_k / num_experts, 1.0)) ** max(verify_rows, 1))
+        mlp_bytes_params_per_layer = exp_distinct * one_expert_params + shared_params + router_params
+        mlp_flops_params_per_tok = top_k * one_expert_params + shared_params + router_params
+        target_linear_params = int(n_layers * mlp_bytes_params_per_layer + non_mlp_params)
+        target_gemm_bytes = target_linear_params * weight_bytes_per_elem
+        target_gemm_flops = 2.0 * (n_layers * mlp_flops_params_per_tok + non_mlp_params) * verify_rows
+    else:
+        inter = int(tc["intermediate_size"])
+        mlp_params_per_layer = h * (2 * inter) + inter * h  # gate_up + down
+        target_linear_params = n_layers * mlp_params_per_layer + non_mlp_params
+        target_gemm_bytes = target_linear_params * weight_bytes_per_elem
+        target_gemm_flops = 2.0 * target_linear_params * verify_rows
 
     # 2) lm_head (scaled by passes per step when multi-pass lookahead runs lm_head)
     lm_head_params = h * vocab
@@ -156,20 +169,25 @@ def compute_class_workloads(
     attn_kv_bytes = n_attn * 2 * n_kv_heads * head_dim * kv_len * 2
     attn_flops = n_attn * verify_rows * 4.0 * n_q_heads * head_dim * kv_len
 
-    # 5) drafter: transformer layers + optional feature fusion + lm_head
-    dh = int(draft_cfg["hidden_size"])
-    dinter = int(draft_cfg["intermediate_size"])
-    dlayers = int(draft_cfg["num_hidden_layers"])
-    dq_heads = int(draft_cfg["num_attention_heads"])
-    dkv_heads = int(draft_cfg.get("num_key_value_heads", dq_heads))
-    dhead_dim = int(draft_cfg.get("head_dim", dh // dq_heads))
-    dq = dq_heads * dhead_dim
-    dkv = dkv_heads * dhead_dim
-    d_target_layers = len(draft_cfg.get("dflash_config", {}).get("target_layer_ids", [5, 19, 33, 47, 61]))
-    d_layer_params = dh * (dq + 2 * dkv) + dq * dh + dh * (2 * dinter) + dinter * dh
-    d_fc_params = (d_target_layers * dh) * dh
-    # Drafter shares target LM head (or runs its own lm_head over draft_block rows)
-    d_params = dlayers * d_layer_params + d_fc_params + h * vocab
+    # 5) drafter: external drafter (e.g. DFlash/EAGLE) or built-in MTP layer (when draft_cfg is empty)
+    if draft_cfg:
+        dh = int(draft_cfg["hidden_size"])
+        dinter = int(draft_cfg.get("intermediate_size", draft_cfg.get("moe_intermediate_size", dh * 2)))
+        dlayers = int(draft_cfg["num_hidden_layers"])
+        dq_heads = int(draft_cfg["num_attention_heads"])
+        dkv_heads = int(draft_cfg.get("num_key_value_heads", dq_heads))
+        dhead_dim = int(draft_cfg.get("head_dim", dh // dq_heads))
+        dq = dq_heads * dhead_dim
+        dkv = dkv_heads * dhead_dim
+        d_target_layers = len(draft_cfg.get("dflash_config", {}).get("target_layer_ids", [5, 19, 33, 47, 61]))
+        d_layer_params = dh * (dq + 2 * dkv) + dq * dh + dh * (2 * dinter) + dinter * dh
+        d_fc_params = (d_target_layers * dh) * dh
+        d_params = dlayers * d_layer_params + d_fc_params + h * vocab
+    else:
+        # Built-in MTP (1-layer MoE/dense decoder + fc + shared lm_head)
+        mtp_layers = int(tc.get("mtp_num_hidden_layers", 1))
+        one_layer_p = (target_linear_params // max(n_layers, 1)) + (2 * h * h)
+        d_params = mtp_layers * one_layer_p + h * vocab
     drafter_bytes = d_params * draft_weight_bytes_per_elem * drafter_passes_per_step
     drafter_flops = 2.0 * d_params * draft_block * drafter_passes_per_step
 

@@ -157,6 +157,25 @@ class TestPhase0Floors(unittest.TestCase):
         self.assertLess(b200.floor_ms(w["target_gemm"]["flops"], w["target_gemm"]["bytes"]),
                         ascend.floor_ms(w["target_gemm"]["flops"], w["target_gemm"]["bytes"]))
 
+    def test_floors_qwen35_35b_a3b_moe_and_mtp(self):
+        cfg_path = Path("/gpfs/models/huggingface.co/Qwen/Qwen3.5-35B-A3B-FP8/config.json")
+        if not cfg_path.is_file():
+            self.skipTest("Qwen3.5-35B-A3B-FP8 config not present")
+        target_cfg = json.loads(cfg_path.read_text())
+        w = compute_class_workloads(
+            target_cfg=target_cfg,
+            draft_cfg={},  # built-in MTP
+            verify_rows=4,
+            draft_block=4,
+            weight_bytes_per_elem=1.0,  # FP8
+            draft_weight_bytes_per_elem=1.0,
+        )
+        # 4 tokens hitting ~30 distinct experts out of 256 across 40 layers in FP8 -> ~5-7 GB active bytes
+        self.assertGreater(w["target_gemm"]["bytes"] / 1e9, 3.0)
+        self.assertLess(w["target_gemm"]["bytes"] / 1e9, 12.0)
+        self.assertGreater(w["gdn_recurrent"]["bytes"], 0.0)
+        self.assertGreater(w["drafter"]["bytes"], 0.0)
+
 
 class TestStratifiedBenchAndProtocol(unittest.TestCase):
     def test_stratify_easy_hard_detects_hard_regression(self):
