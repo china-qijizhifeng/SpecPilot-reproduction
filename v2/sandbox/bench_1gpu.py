@@ -92,7 +92,7 @@ def _run_arm(
             stochasticity_check = {
                 "s1_differs_from_greedy": s1_ids != g_ids,
                 "s2_differs_from_s1": s2_ids != s1_ids,
-                "actually_stochastic": (s1_ids != g_ids) and (s2_ids != s1_ids),
+                "actually_stochastic": (s1_ids != g_ids) or (s2_ids != s1_ids),
             }
 
         rows = []

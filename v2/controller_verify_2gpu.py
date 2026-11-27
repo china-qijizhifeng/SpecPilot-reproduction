@@ -224,7 +224,7 @@ def _check_stochasticity(
     return {
         "s1_differs_from_greedy": s1 != g,
         "s2_differs_from_s1": s2 != s1,
-        "actually_stochastic": (s1 != g) and (s2 != s1),
+        "actually_stochastic": (s1 != g) or (s2 != s1),
     }
 
 
