@@ -45,7 +45,8 @@ GitHub：[china-qijizhifeng/SpecPilot-reproduction](https://github.com/china-qij
 | **Stock（原生 Leviathan 链）** | 原生 DFlash2 W8 链 | `187.7`, $\tau=4.63$ | `1.0000×` | `0.005332` / `p=0.526` | 基线（已缓存） |
 | **Blind R1** | 12-bit 无损压缩 + FP32 GDN 融合 + Draft FP8 | `219.8`, $\tau=4.58$ | `1.1807× [1.1521, 1.2098]` | `0.005573` / `p=0.681` | `PROMOTED` |
 | **Blind R2** | + 全量 12-bit (`out_proj/o_proj/lm_head`) + 零 SMEM 融合核 | `231.1`, $\tau=4.56$ | `1.2337× [1.2128, 1.2548]` | **`0.005265`** / **`p=0.911`** | `PROMOTED` |
-| **Blind R3（当前盲测最佳）** | + 并行 Overflow CTA（消 185 次核启动）+ 在线 Softmax/胶水融合 | **`249.5`**, $\tau=4.72$ | **`1.3277× [1.2982, 1.3595]`** | **`0.005319`** / `p=0.618` | **`PROMOTED`** |
+| **Blind R3** | + 并行 Overflow CTA（消 185 次核启动）+ 在线 Softmax/胶水融合 | `249.5`, $\tau=4.72$ | `1.3277× [1.2982, 1.3595]` | `0.005319` / `p=0.618` | `PROMOTED` |
+| **Blind R4（当前盲测最佳）** | + Intra-CTA Split-K 12-bit V4（256 层均速 `2784 GB/s`）+ 640-thread Norm/SiLU/GDN-conv1d 融合（再消 496 次核启动/步，步长 `18.04 ms`） | **`249.5`**, $\tau=4.50$ (`18.04 ms/step`) | **`1.3461× [1.3083, 1.3827]`** | **`0.005269`** / **`p=0.816`** (`40 < 41` 事件) | **`PROMOTED`** |
 | *（对照上限）`r6_tree_sampling_t07`* | *R6 算子 + WY 树 GDN + `M=28, D=12` 宽深树 Target-Only* | **`279.9`**, $\tau=6.15$ | **`1.5089× [1.4724, 1.5443]`** | `0.005359` / `p=0.238` | `PROMOTED` |
 
 > 完整实验报告与技术笔记：[SpecPilot v2 全盲测实验报告](docs/experiments/specpilot-v2-blind-r1-r4-20261125.md) · [投机解码无损拒绝采样笔记](docs/notes/speculative-rejection-sampling.md)

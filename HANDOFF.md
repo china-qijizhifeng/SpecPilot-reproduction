@@ -8,7 +8,8 @@
   - **无记忆纯盲测 `temp=0.7` Round 1**（`t07-blind-r1-d1d2d5`）：**`1.1807× [1.1521, 1.2098]`**（`219.77 tok/s`，39 vs 41 Stock 事件，PIT-KS `p=0.681`，`promoted=true`）；
   - **无记忆纯盲测 `temp=0.7` Round 2**（`t07-blind-r2-d1d2v2d5`）：**`1.2337× [1.2128, 1.2548]`**（`231.11 tok/s`，31 vs 41 Stock 事件，`mean_tvd=0.005265` < Stock `0.005332`，PIT-KS `p=0.911`，`promoted=true`）；
   - **无记忆纯盲测 `temp=0.7` Round 3**（`t07-blind-r3-d1v3d4`，新三态结案协议）：**`1.3277× [1.2982, 1.3595]`**（`249.53 tok/s`，`mean_tvd=0.005319` < Stock `0.005332`，`z_top1=+0.14`，PIT-KS `p=0.618`，`promoted=true`）；
-  - **无记忆纯盲测 `temp=0.7` Round 4**（`t07-blind-r4-tree-m16`，4 路树 Co-Design）：双端 Target-Only 对照 **`1.2808× [1.2042, 1.3498]`**（`215.43` vs `168.03 tok/s`，$\tau: 4.15 \to 5.03$，`mean_tvd=0.005165` < Stock `0.005332`，`z_nll=+0.49`，`z_top1=+0.20`，PIT-KS `p=0.726`，`promoted=true`）。
+  - **无记忆纯盲测 `temp=0.7` 原生基线 Round 4**（`t07-blind-r4-d3d5`，`job-36b11895db7c-20261127173526`，Intra-CTA Split-K 12-bit V4 + 640-thread Norm/SiLU/GDN-conv1d 融合，另物理证伪 `M=16` 树 / Huffman 10.7 bpw / 宽块 / W4A16 Drafter 4 路）：**`1.3461× [1.3083, 1.3827]`**（`249.53 tok/s` @ $\tau=4.50$, 步长 `18.04 ms/step`，`40 < 41` Stock 事件，`mean_tvd=0.005269 < 0.005332`，`p99_tvd=0.037566 < 0.038069`，PIT-KS `p=0.816`，`promoted=true`）。
+  - *（历史参考：双端 Target-Only 限制实验 `t07-blind-r4-tree-m16`：`1.2808× [1.2042, 1.3498]`，`215.43` vs `168.03 tok/s`，已从主页移除并撤销 `--target-only` 限制）*。
 - **原生探索协议与可选 5 轴 Memory 升级**：`v2/agents/{direction_prompt,master_prompt}.md` 落地 3 小时深挖预算 + 三态结案协议（`PROMOTABLE` / `PROVEN_FALSIFIED` / `STEPPING_STONE_HANDOFF`）+ 实测/理论 $\tau$ 对齐检查；`v2/memory/store.py` 升级 5 轴通用迁移引擎（默认关闭、默认隐藏 `blocked`）；已撤销 `--target-only` 限制以保持对 Stock/Candidate 采样策略的通用无限制兼容。**17/17 单元测试通过**。
 
 ## H100最新收口：SpecPilot v2 全盲测闭环（Round 1–4，2026-11-25）
