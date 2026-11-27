@@ -46,7 +46,6 @@ GitHub：[china-qijizhifeng/SpecPilot-reproduction](https://github.com/china-qij
 | **Blind R1** | 12-bit 无损压缩 + FP32 GDN 融合 + Draft FP8 | `219.8`, $\tau=4.58$ | `1.1807× [1.1521, 1.2098]` | `0.005573` / `p=0.681` | `PROMOTED` |
 | **Blind R2** | + 全量 12-bit (`out_proj/o_proj/lm_head`) + 零 SMEM 融合核 | `231.1`, $\tau=4.56$ | `1.2337× [1.2128, 1.2548]` | **`0.005265`** / **`p=0.911`** | `PROMOTED` |
 | **Blind R3（当前盲测最佳）** | + 并行 Overflow CTA（消 185 次核启动）+ 在线 Softmax/胶水融合 | **`249.5`**, $\tau=4.72$ | **`1.3277× [1.2982, 1.3595]`** | **`0.005319`** / `p=0.618` | **`PROMOTED`** |
-| **Blind R4（4 路树 Co-Design）** | 12-bit V4 (`M=32` `1.85×`) + Heavy-Light DFS 树 GDN (`2.50×`) + `M=16` 树验证 | `215.4` (`224.1` vs Lev), $\tau=5.03\sim 5.11$ | `1.2808×` (Target-Only 对齐) / `1.1927×` (vs Lev) | **`0.005165`** / `p=0.726` | `PROMOTED` (对齐) |
 | *（对照上限）`r6_tree_sampling_t07`* | *R6 算子 + WY 树 GDN + `M=28, D=12` 宽深树 Target-Only* | **`279.9`**, $\tau=6.15$ | **`1.5089× [1.4724, 1.5443]`** | `0.005359` / `p=0.238` | `PROMOTED` |
 
 > 完整实验报告与技术笔记：[SpecPilot v2 全盲测实验报告](docs/experiments/specpilot-v2-blind-r1-r4-20261125.md) · [投机解码无损拒绝采样笔记](docs/notes/speculative-rejection-sampling.md)
