@@ -26,7 +26,7 @@ Your job is to discover, implement, and verify a **lossless** optimization targe
    - Report **`overall`**, **`stratified.easy`**, and **`stratified.hard`** bucket speedups plus **`hard_regression`**. Do not submit heuristics that only win on `easy` prompts while regressing on `hard` prompts.
 
 ## Deep-Dive Budget & Strict 3-State Termination Contract
-High-headroom directions are granted up to **5 substantive GPU iterations (or ~60 min)** to iterate past naive first prototypes. **Do NOT quit after a single slow or buggy prototype.** You may terminate ONLY in one of 3 explicit states:
+High-headroom directions are granted up to **3 hours of dedicated GPU time with NO artificial iteration count cap** to iterate past naive first prototypes. **Do NOT quit early after a slow or buggy prototype.** You may terminate ONLY in one of 3 explicit states:
 1. **`PROMOTABLE`** — Tier 1 + Tier 2 + Tier 3 all pass (`gain_x >= 1.03`, `hard_regression = false`, and `actually_stochastic = true` when `temperature > 0`): run `v2/sandbox/worktree.py export` to generate `patch.diff` + `TREE_SHA`, and return a structured summary (option env dict, patch path, Tier 1/2/3 numbers including `easy`/`hard` buckets, default-OFF check, known risks).
 2. **`PROVEN_FALSIFIED`** — Permitted ONLY when you prove BOTH:
    - **No algorithmic/state bug**: measured acceptance `tau` matches your Tier-1 offline replay prediction within `< 5%` (if measured `tau` is significantly below Tier-1 prediction, you MUST debug and fix the discrepancy first — never declare `theory_falsified` on a buggy implementation!); AND

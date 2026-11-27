@@ -54,9 +54,9 @@ GitHub：[china-qijizhifeng/SpecPilot-reproduction](https://github.com/china-qij
   - **`temperature > 0`（Target-Only）全链路无损支持与盲测验证（Qwen3.8-27B，`T=0.7`）**：
     - 新增 [v2/t1s_verify.py](v2/t1s_verify.py)（T1-S 分布 Token Forcing M1~M5：`TVD > 0.05` 事件、Mean/P99 TVD、`dlogp`、随机性冒烟 + 鞅检验 $Z_{\text{NLL}}/Z_{\text{top1}}$ + PIT-KS，以及 Stock 基线缓存）与 `tau_headroom.py` 树期望接受长度；
     - 锁定官方 `sgl_kernel.tree_speculative_sampling_target_only`（`draft_probs=0, threshold=1.0`，链/树统一无损，20 万次蒙特卡洛最大单项误差 `0.00096`），`r6_tree_sampling_t07` 经 2×H100 Controller 验收达 **`1.5089× [1.4724, 1.5443]`**（`279.94 tok/s`，T1-S 全 5 项门禁通过）；
-    - **无记忆纯盲测 `temp=0.7` Round 1 & Round 2**：R1 达 **`1.1807× [1.1521, 1.2098]`**（`219.77 tok/s`，39 vs 41 Stock 事件，PIT-KS `p=0.681`），R2 达 **`1.2337× [1.2128, 1.2548]`**（`231.11 tok/s`，31 vs 41 Stock 事件，`mean_tvd=0.005265` < Stock `0.005332`，PIT-KS `p=0.911`），均 **`promoted = true`**；
-  - **原生探索能力与通用 5 轴可选 Memory 升级**：`direction_prompt.md` / `master_prompt.md` 落地深度迭代预算 + 三态结案协议（`PROMOTABLE` / `PROVEN_FALSIFIED` / `STEPPING_STONE_HANDOFF`）+ 实测/理论 $\tau$ 对齐检查；`v2/memory/store.py` 升级为 5 轴通用迁移引擎（默认关闭、支持 `code_direct / code_adapt / pattern_transfer / blocked` 自动隔离）；**17/17 单元测试全部通过**。
-- **正在做**：启动升级后的无记忆盲测 `temp=0.7` Round 3，验证三态结案与 Stepping-Stone 接力机制的原生破局能力。
+    - **无记忆纯盲测 `temp=0.7` Round 1–4**：R1 **`1.1807× [1.1521, 1.2098]`**（`219.77 tok/s`）、R2 **`1.2337× [1.2128, 1.2548]`**（`231.11 tok/s`）、R3 **`1.3277× [1.2982, 1.3595]`**（**`249.53 tok/s`**，纯链 + 并行 Overflow CTA + 在线 Softmax 融合，`mean_tvd=0.005319` < Stock `0.005332`，PIT-KS `p=0.618`），R4 Target-Only 4 路树 Co-Design **`1.2808× [1.2042, 1.3498]`**（`M=16` 树，$\tau: 4.15 \to 5.03$，`z_nll=+0.49`，PIT-KS `p=0.726`），全部 **`promoted = true`**；
+  - **原生探索能力与通用 5 轴可选 Memory 升级**：`direction_prompt.md` / `master_prompt.md` 落地 3 小时深挖预算 + 三态结案协议（`PROMOTABLE` / `PROVEN_FALSIFIED` / `STEPPING_STONE_HANDOFF`）+ 实测/理论 $\tau$ 对齐检查；`v2/memory/store.py` 升级为 5 轴通用迁移引擎（默认关闭、支持 `code_direct / code_adapt / pattern_transfer / blocked` 自动隔离）；**17/17 单元测试全部通过**。
+- **正在做**：`temp = 0`（Dense + Sparse MoE）与 `temp > 0`（T1-S 通用黑盒无损验证，不限内部走 Leviathan 链或 Target-Only / Sequoia 树）全套系统均已收口并同步。
 - **接下来（可选）**：继续推进 `Qwen3.5-35B-A3B-FP8` Round 2 或扩展大 Batch（`bs=8/16`）场景验证。
 
 ---
